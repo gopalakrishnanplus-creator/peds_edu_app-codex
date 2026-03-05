@@ -147,7 +147,6 @@ The settings indicate AWS Ubuntu deployment with MySQL, static file serving via 
 
 ### Architecture diagram (Mermaid)
 
-```mermaid
 flowchart LR
   subgraph Users
     D[Doctor/Clinic staff]:::user
@@ -161,7 +160,7 @@ flowchart LR
     MDB[(Master MySQL DB)]
   end
 
-  subgraph Portal[CPD in Clinic Portal (Django: peds_edu)]
+  subgraph Portal[CPD in Clinic Portal (Django - peds_edu)]
     W[Web Server / Django]
     A[accounts]
     C[catalog]
@@ -203,7 +202,6 @@ flowchart LR
   MS -->|SSO JWT link| SSO
 
   classDef user fill:#eef,stroke:#88a;
-```
 
 ### Component interaction diagram (Mermaid)
 
