@@ -1,6 +1,5 @@
 # CPD in Clinic Portal – Patient Education System (PedsEdu) – System Documentation
 
-_Generated: 2026-03-05 11:55 UTC_
 
 This document is a **complete system knowledge base** for the Patient Education (PE) web application deployed at `portal.cpdinclinic.co.in`.
 
