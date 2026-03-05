@@ -146,36 +146,38 @@ The settings indicate AWS Ubuntu deployment with MySQL, static file serving via 
 - CSRF trusted origins include the portal domain and a public IP (used during testing/deployment)
 
 ### Architecture diagram (Mermaid)
-
+```mermaid
 flowchart LR
+
   subgraph Users
-    D[Doctor/Clinic staff]:::user
-    P[Caregiver]:::user
-    Pub[Publisher]:::user
-    FR[Field Rep]:::user
+    D[Doctor or Clinic Staff]
+    P[Caregiver]
+    PUB[Publisher]
+    FR[Field Representative]
   end
 
-  subgraph Master[Master Publishing System / Master DB]
+  subgraph Master_System
     MS[Master Publishing UI]
-    MDB[(Master MySQL DB)]
+    MDB[(Master MySQL Database)]
   end
 
-  subgraph Portal[CPD in Clinic Portal (Django - peds_edu)]
-    W[Web Server / Django]
-    A[accounts]
-    C[catalog]
-    S[sharing]
-    PB[publisher]
-    SSO[sso]
-    PDB[(Portal MySQL DB)]
-    Cache[(Redis/LocMem Cache)]
-    Media[(Media files)]
+  subgraph CPD_Clinic_Portal_Django_peds_edu
+    W[Web Server - Django]
+    A[accounts module]
+    C[catalog module]
+    S[sharing module]
+    PB[publisher module]
+    SSO[sso module]
+
+    PDB[(Portal MySQL Database)]
+    CACHE[(Redis or Local Cache)]
+    MEDIA[(Media Files Storage)]
   end
 
-  D -->|Login, Share| W
-  Pub -->|SSO link| W
-  FR -->|Recruitment link| W
-  P -->|Patient link| W
+  D -->|Login and Share| W
+  PUB -->|SSO Link| W
+  FR -->|Recruitment Link| W
+  P -->|Patient Link| W
 
   W --> A
   W --> C
@@ -183,26 +185,24 @@ flowchart LR
   W --> PB
   W --> SSO
 
-  A -->|read/write| MDB
+  A -->|read write| MDB
   PB -->|read| MDB
   S -->|read| MDB
 
-  A -->|read/write| PDB
-  C -->|read/write| PDB
+  A -->|read write| PDB
+  C -->|read write| PDB
   S -->|read| PDB
-  PB -->|read/write| PDB
+  PB -->|read write| PDB
 
-  S --> Cache
-  C --> Cache
+  S --> CACHE
+  C --> CACHE
 
-  PB --> Media
-  A --> Media
+  PB --> MEDIA
+  A --> MEDIA
 
   MS --> MDB
-  MS -->|SSO JWT link| SSO
-
-  classDef user fill:#eef,stroke:#88a;
-
+  MS -->|SSO JWT Link| SSO
+```
 ### Component interaction diagram (Mermaid)
 
 ```mermaid
