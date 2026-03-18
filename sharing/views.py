@@ -171,12 +171,19 @@ def _resolve_shared_item_details(*, shared_item_type: str, shared_item_code: str
     return cluster.code, (clang.name if clang and clang.name else cluster.display_name or cluster.code)
 
 
-def _tracking_audit_user_email() -> str:
-    return str(getattr(settings, "TRACKING_AUDIT_USER_EMAIL", "") or "").strip().lower()
+# def _tracking_audit_user_email() -> str:
+#     return str(getattr(settings, "TRACKING_AUDIT_USER_EMAIL", "") or "").strip().lower()
 
+
+# def _is_tracking_audit_user(user) -> bool:
+#     return bool(getattr(user, "is_authenticated", False) and str(getattr(user, "email", "") or "").strip().lower() == _tracking_audit_user_email())
 
 def _is_tracking_audit_user(user) -> bool:
-    return bool(getattr(user, "is_authenticated", False) and str(getattr(user, "email", "") or "").strip().lower() == _tracking_audit_user_email())
+    return bool(
+        getattr(user, "is_authenticated", False)
+        and getattr(user, "is_superuser", False)
+    )
+
 
 
 # -----------------------
@@ -611,8 +618,7 @@ def log_playback_event(request: HttpRequest) -> HttpResponse:
 
 
 def tracking_login(request: HttpRequest) -> HttpResponse:
-    if not _tracking_audit_user_email():
-        return HttpResponseForbidden("Tracking dashboard is not configured.")
+    
 
     if _is_tracking_audit_user(request.user):
         return redirect("sharing:tracking_dashboard")
@@ -621,14 +627,12 @@ def tracking_login(request: HttpRequest) -> HttpResponse:
         email = str(request.POST.get("email") or "").strip().lower()
         password = str(request.POST.get("password") or "")
 
-        if email != _tracking_audit_user_email():
-            messages.error(request, "This page is restricted to the tracking viewer account.")
-        else:
-            user = authenticate(request, email=email, password=password)
-            if user is not None:
-                login(request, user)
-                return redirect("sharing:tracking_dashboard")
-            messages.error(request, "Invalid credentials.")
+        user = authenticate(request, email=email, password=password)
+        if user is not None and user.is_superuser:
+            login(request, user)
+            return redirect("sharing:tracking_dashboard")
+
+        messages.error(request, "Only a superuser can access this page.")
 
     return render(
         request,
@@ -638,12 +642,10 @@ def tracking_login(request: HttpRequest) -> HttpResponse:
             "allowed_email": _tracking_audit_user_email(),
         },
     )
-
-
+    
 @login_required
 def tracking_dashboard(request: HttpRequest) -> HttpResponse:
-    if not _tracking_audit_user_email():
-        return HttpResponseForbidden("Tracking dashboard is not configured.")
+    
     if not _is_tracking_audit_user(request.user):
         return HttpResponseForbidden("Not allowed")
 
