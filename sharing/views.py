@@ -618,8 +618,6 @@ def log_playback_event(request: HttpRequest) -> HttpResponse:
 
 
 def tracking_login(request: HttpRequest) -> HttpResponse:
-    
-
     if _is_tracking_audit_user(request.user):
         return redirect("sharing:tracking_dashboard")
 
@@ -639,10 +637,9 @@ def tracking_login(request: HttpRequest) -> HttpResponse:
         "sharing/tracking_login.html",
         {
             "show_auth_links": False,
-            "allowed_email": _tracking_audit_user_email(),
         },
     )
-    
+   
 @login_required
 def tracking_dashboard(request: HttpRequest) -> HttpResponse:
     
