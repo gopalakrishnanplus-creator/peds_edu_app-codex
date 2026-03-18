@@ -18,9 +18,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://portal.cpdinclinic.co.in",
-    "https://www.portal.cpdinclinic.co.in",
-    "http://3.6.101.52",
+    'http://portal.cpdinclinic.co.in',
+    'https://portal.cpdinclinic.co.in',
 ]
 
 
@@ -87,9 +86,9 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",  # Force MySQL
         "NAME": env("DB_NAME", "patient_portal_local"),
-        "USER": env("DB_USER", "root_patient_portal"),
-        "PASSWORD": env("DB_PASSWORD", "Kad78RaaU%W^S%$1"),
-        "HOST": env("DB_HOST", "65.0.143.171"),
+        "USER": env("DB_USER", "django_root"),
+        "PASSWORD": env("DB_PASSWORD", "R$KG5yIaHZH8B"),
+        "HOST": env("DB_HOST", "localhost"),
         "PORT": env("DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},
     }
@@ -103,10 +102,10 @@ MASTER_DB_ALIAS = "master"
 
 # ❌ Do NOT use env or secrets
 MASTER_DB_ENGINE = "django.db.backends.mysql"
-MASTER_DB_NAME = "YOUR_DATABASE_NAME"
-MASTER_DB_USER = "root"
-MASTER_DB_PASSWORD = "Hemsod-vytsew-7qypxa"
-MASTER_DB_HOST = "new-forms-rds.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com"
+MASTER_DB_NAME = "healthcare_forms_2"
+MASTER_DB_USER = "admin"
+MASTER_DB_PASSWORD = "fizxyZ-rovpat-memri5"
+MASTER_DB_HOST = "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com"
 MASTER_DB_PORT = "3306"
 
 # Table/column config (leave as-is unless schema differs)
@@ -164,7 +163,6 @@ MEDIA_URL = env("MEDIA_URL", "/media/")
 MEDIA_ROOT = Path(env("MEDIA_ROOT", "/home/ubuntu/patient-portal-media")).resolve()
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-TRACKING_AUDIT_USER_EMAIL = env("TRACKING_AUDIT_USER_EMAIL", "").strip().lower()
 
 # ---------------- SESSIONS ----------------
 SESSION_COOKIE_AGE = int(env("SESSION_COOKIE_AGE_SECONDS", str(60 * 60 * 24 * 90)))
@@ -343,8 +341,8 @@ DATABASES[MASTER_DB_ALIAS] = {
     "ENGINE": "django.db.backends.mysql",
     "NAME": "healthcare_forms_2",
     "USER": "admin",
-    "PASSWORD": "Hemsod-vytsew-7qypxa",
-    "HOST": "new-forms-rds.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
+    "PASSWORD": "fizxyZ-rovpat-memri5",
+    "HOST": "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
     "PORT": "3306",
     "OPTIONS": {"charset": "utf8mb4"},
     "CONN_MAX_AGE": 60,
