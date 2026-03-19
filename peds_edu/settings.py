@@ -88,7 +88,7 @@ DATABASES = {
         "NAME": "patient_portal_live",
         "USER": "patient_portal_root",
         "PASSWORD": "R$KG5yIaHZH8B",
-        "HOST": "localhost",
+        "HOST": "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
         "PORT": "3306",
         "OPTIONS": {"charset": "utf8mb4"},
     }
