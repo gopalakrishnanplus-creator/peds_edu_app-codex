@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Tracking Login{% endblock %}
+{% block header_title %}Share Tracking Login{% endblock %}
+
+{% block content %}
+<div class="page-shell page-shell--auth">
+  <section class="card hero-card stack-lg">
+    <div class="section-heading__text">
+      <h2>Restricted Access</h2>
+      <p class="section-subtitle">This dashboard is limited to the dedicated tracking viewer account.</p>
+    </div>
+
+    <form method="post" class="form-stack">
+      {% csrf_token %}
+      <div class="field-group">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" value="{{ allowed_email }}" autocomplete="username" required />
+      </div>
+      <div class="field-group">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="btn btn-block">Open Tracking Dashboard</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

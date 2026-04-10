@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}Share Tracking Dashboard{% endblock %}
+{% block header_title %}Share Tracking Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-shell">
+  <section class="card hero-card">
+    <div class="section-heading">
+      <div class="section-heading__text">
+        <h1>Share Activity Overview</h1>
+        <p class="section-subtitle">Doctor-level share counts, banner engagement, recipient references, and video playback milestones.</p>
+      </div>
+      <a class="btn btn-secondary" href="{% url 'sharing:tracking_logout' %}">Logout</a>
+    </div>
+  </section>
+
+  <section class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-card__header">
+        <span class="stat-card__label">Doctors tracked</span>
+        <span class="stat-card__icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-user"></use></svg></span>
+      </div>
+      <div class="stat-card__value">{{ stats.doctor_count }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card__header">
+        <span class="stat-card__label">Total shares</span>
+        <span class="stat-card__icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-share"></use></svg></span>
+      </div>
+      <div class="stat-card__value">{{ stats.share_count }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card__header">
+        <span class="stat-card__label">Playback events</span>
+        <span class="stat-card__icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-play"></use></svg></span>
+      </div>
+      <div class="stat-card__value">{{ stats.playback_event_count }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card__header">
+        <span class="stat-card__label">Banner clicks</span>
+        <span class="stat-card__icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-tag"></use></svg></span>
+      </div>
+      <div class="stat-card__value">{{ stats.banner_click_count }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card__header">
+        <span class="stat-card__label">Unique items shared</span>
+        <span class="stat-card__icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#icon-layers"></use></svg></span>
+      </div>
+      <div class="stat-card__value">{{ stats.unique_items_shared }}</div>
+    </div>
+  </section>
+
+  <section class="card stack-md">
+    <div class="section-heading__text">
+      <h3>Doctor Summary</h3>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Doctor ID</th>
+            <th>Doctor</th>
+            <th>Clinic</th>
+            <th class="text-right">Total shares</th>
+            <th>Last shared</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in summary_rows %}
+            <tr>
+              <td>{{ row.doctor_id }}</td>
+              <td>{{ row.doctor_name_snapshot|default:"-" }}</td>
+              <td>{{ row.clinic_name_snapshot|default:"-" }}</td>
+              <td class="text-right">{{ row.total_shares }}</td>
+              <td>{{ row.last_shared_at|date:"Y-m-d H:i" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td class="table-empty" colspan="5">No share activity yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card stack-md">
+    <div class="section-heading__text">
+      <h3>Recent Shares</h3>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Doctor</th>
+            <th>Type</th>
+            <th>Shared item</th>
+            <th>Recipient ref</th>
+            <th>Language</th>
+            <th>Channel</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in recent_shares %}
+            <tr>
+              <td>{{ row.shared_at|date:"Y-m-d H:i" }}</td>
+              <td>{{ row.doctor_name_snapshot|default:row.doctor_id }}</td>
+              <td>{{ row.shared_item_type }}</td>
+              <td>{{ row.shared_item_name }}</td>
+              <td class="mono">{{ row.recipient_reference }}</td>
+              <td>{{ row.language_code }}</td>
+              <td>{{ row.share_channel }}</td>
+            </tr>
+          {% empty %}
+            <tr><td class="table-empty" colspan="7">No share records available.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card stack-md">
+    <div class="section-heading__text">
+      <h3>Recent Playback Events</h3>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Doctor ID</th>
+            <th>Page type</th>
+            <th>Event</th>
+            <th>Video</th>
+            <th class="text-right">Milestone</th>
+            <th>Share ref</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in recent_playback %}
+            <tr>
+              <td>{{ row.occurred_at|date:"Y-m-d H:i" }}</td>
+              <td>{{ row.doctor_id }}</td>
+              <td>{{ row.page_item_type }}</td>
+              <td>{{ row.event_type }}</td>
+              <td>{{ row.video_name|default:row.video_code }}</td>
+              <td class="text-right">
+                {% if row.milestone_percent %}{{ row.milestone_percent }}%{% else %}-{% endif %}
+              </td>
+              <td class="mono">{{ row.share_public_id|default:"-" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td class="table-empty" colspan="7">No playback events available.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card stack-md">
+    <div class="section-heading__text">
+      <h3>Recent Banner Clicks</h3>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Doctor ID</th>
+            <th>Page type</th>
+            <th>Banner ID</th>
+            <th>Banner</th>
+            <th>Target URL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in recent_banner_clicks %}
+            <tr>
+              <td>{{ row.clicked_at|date:"Y-m-d H:i" }}</td>
+              <td>{{ row.doctor_id }}</td>
+              <td>{{ row.page_type }}</td>
+              <td class="mono">{{ row.banner_id|default:"-" }}</td>
+              <td>{{ row.banner_name|default:"-" }}</td>
+              <td class="mono">{{ row.banner_target_url|default:"-" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td class="table-empty" colspan="6">No banner click events available.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}

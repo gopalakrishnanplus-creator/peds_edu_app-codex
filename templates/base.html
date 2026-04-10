@@ -550,9 +550,30 @@ legend {
           <div class="message {% if message.tags %}{{ message.tags }}{% endif %}">{{ message }}</div>
         {% endfor %}
       </div>
-    {% endif %}
+    </header>
 
-    {% block content %}{% endblock %}
+    <main class="page-main">
+      <div class="container">
+        {% if messages %}
+          <div class="messages">
+            {% for message in messages %}
+              <div class="message {% if message.tags %}{{ message.tags }}{% endif %}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container site-footer__inner">
+        <div class="site-footer__brand">
+          <img class="site-footer__mark" src="{% static 'icons/brand-mark.svg' %}" alt="" />
+          <span>Patient Education</span>
+        </div>
+      </div>
+    </footer>
   </div>
   {% if support_widget %}
     {% include "includes/support_widget.html" %}
