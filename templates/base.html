@@ -1,9 +1,14 @@
+{% load static %}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
   <title>{% block title %}Patient Education{% endblock %}</title>
+  {% if support_widget %}
+  <link rel="preconnect" href="https://help.cpdinclinic.co.in" crossorigin />
+  <link rel="stylesheet" href="{% static 'support/support_widget.css' %}" />
+  {% endif %}
   <style>
 :root {
   --bg: #f8fafc;
@@ -538,7 +543,7 @@ legend {
 </div>
 
 
-  <div class="container">
+  <div class="container{% if support_widget %} container--with-support-widget{% endif %}">
     {% if messages %}
       <div class="messages">
         {% for message in messages %}
@@ -549,5 +554,9 @@ legend {
 
     {% block content %}{% endblock %}
   </div>
+  {% if support_widget %}
+    {% include "includes/support_widget.html" %}
+    <script src="{% static 'support/support_widget.js' %}"></script>
+  {% endif %}
 </body>
 </html>
