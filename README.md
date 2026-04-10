@@ -17,7 +17,8 @@
 9. [Developer Onboarding Guide](#9-developer-onboarding-guide)
 10. [Deployment and Operations](#10-deployment-and-operations)
 11. [Security and Known Risks](#11-security-and-known-risks)
-12. [AI-Optimized System Summary](#12-ai-optimized-system-summary)
+12. [Support Chat and Help Center Integration](#12-support-chat-and-help-center-integration)
+13. [AI-Optimized System Summary](#13-ai-optimized-system-summary)
 
 ---
 
@@ -52,6 +53,7 @@ PedsEdu is a Django monolith for pediatric patient education delivery in clinics
 | Campaigns | SSO-based publisher module for adding/editing campaign details and cluster composition |
 | Field Rep Flow | Campaign-aware onboarding path for known/new doctors |
 | Analytics | Share activity + playback milestones + banner click events + dashboard |
+| Support | Context-aware embedded support widget and help center deep links (`help.cpdinclinic.co.in`) |
 
 ### 1.4 Target users
 
@@ -754,15 +756,84 @@ Use `deploy/nginx.conf` and `deploy/gunicorn.service` as references.
 
 ---
 
-## 12) AI-Optimized System Summary
 
-### 12.1 Architecture
+
+## 12) Support Chat and Help Center Integration
+
+PedsEdu has a page-aware support system backed by **https://help.cpdinclinic.co.in** and rendered as an embedded floating support widget in the base layout.
+
+### 12.1 How support config is resolved
+
+- `sharing/support_widget.py` defines:
+  - help center base URL (`HELP_CENTER_BASE_URL`)
+  - source-system label (`SOURCE_SYSTEM = "Patient Education"`)
+  - page metadata map (`_SUPPORT_PAGES`)
+  - route-to-page map (`_ROUTE_TO_SUPPORT_PAGE`)
+- `sharing/context_processors.py` injects `support_widget` into template context for mapped routes.
+- `templates/base.html` conditionally preconnects to help center and includes `templates/includes/support_widget.html`.
+
+### 12.2 Page-to-support mapping
+
+| App route (`view_name`) | Support page key | User type | Flow label | Page slug |
+|---|---|---|---|---|
+| `accounts:login` | `doctor_login` | doctor | `Flow1 / Doctor` | `patient-education-flow1-doctor-doctor-login-page` |
+| `sharing:doctor_share` | `doctor_clinic_sharing` | doctor | `Flow1 / Doctor` | `patient-education-flow1-doctor-doctor-clinic-sharing-page` |
+| `sharing:patient_video` | `patient_page` | patient | `Flow2 / Patient` | `patient-education-flow2-patient-patient-page` |
+| `sharing:patient_cluster` | `patient_page` | patient | `Flow2 / Patient` | `patient-education-flow2-patient-patient-page` |
+
+There is also a dedicated `doctor_credentials_email` support page key used in credential emails sent from `accounts/views.py` (`_send_doctor_links_email`).
+
+### 12.3 URLs generated per support page
+
+For each mapped support page, the code generates:
+
+- `page_url`: full help page
+- `widget_url`: help widget page
+- `embed_url`: widget URL with `embed=1` for iframe mode
+- `api_url`: help page API endpoint
+
+All URLs include query params:
+
+- `system=Patient Education`
+- `flow=<Flow label>`
+
+### 12.4 Widget behavior in UI
+
+`templates/includes/support_widget.html` implements:
+
+- fixed-position floating launcher button
+- open/close panel with embedded iframe
+- loading state and retry/error state
+- “Open support” fallback link in new tab
+- accessibility affordances (`aria-*`, focus-visible styles)
+
+### 12.5 Support in outbound communication
+
+Doctor credential emails append a support link (widget URL) when available. Campaign email templates can include placeholders such as:
+
+- `<support_link>` / `{{support_link}}`
+- `<doctor_support_link>` / `{{doctor_support_link}}`
+
+### 12.6 Test coverage for support mapping
+
+`sharing/tests.py` validates:
+
+- login page mapping
+- doctor share mapping
+- patient video/cluster mapping
+- doctor-credentials email support link availability
+
+---
+
+## 13) AI-Optimized System Summary
+
+### 13.1 Architecture
 
 - Django monolith with app-level modularity.
 - Dual database integration (`default` + `master`).
 - Server-rendered front-end with selective JSON APIs.
 
-### 12.2 Core modules
+### 13.2 Core modules
 
 - `accounts`: identity, master auth, registration, reset.
 - `catalog`: canonical content model.
@@ -770,27 +841,27 @@ Use `deploy/nginx.conf` and `deploy/gunicorn.service` as references.
 - `publisher`: campaign and staff management.
 - `sso`: external token ingest and session creation.
 
-### 12.3 Key services
+### 13.3 Key services
 
 - Catalog payload builder (`sharing.services`).
 - Master doctor auth/context (`peds_edu.master_db`).
 - Enrollment/publisher master lookups (`accounts.master_db`).
 - JWT verification (`sso.jwt`).
 
-### 12.4 Data model essentials
+### 13.4 Data model essentials
 
 - Content graph: TherapyArea → Trigger → VideoCluster ↔ Video (+ language tables).
 - Campaign records bind campaign metadata to one cluster (`publisher_campaign`).
 - Analytics events attach to per-doctor summaries (`sharing_*` models).
 
-### 12.5 Main flows
+### 13.5 Main flows
 
 - Doctor login → share page → WhatsApp link → patient view.
 - Patient playback events → analytics tables.
 - Publisher SSO → campaign create/edit → campaign-bound cluster.
 - Field-rep landing → doctor lookup → enroll or register path.
 
-### 12.6 Fast mental model for agents
+### 13.6 Fast mental model for agents
 
 - If a bug is in **what doctors can share**, start in `sharing/views.py` + `sharing/services.py` + campaign filters.
 - If a bug is in **who can log in**, start in `accounts/views.py` + `peds_edu/master_db.py`.
