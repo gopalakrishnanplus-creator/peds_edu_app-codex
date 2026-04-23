@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from .aws_secrets import get_secret_string  # Optional fallback for secrets
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv("/var/www/secrets/.env")
+load_dotenv(BASE_DIR / ".env")
 
 CSRF_TRUSTED_ORIGINS = [
     'http://portal.cpdinclinic.co.in',
@@ -85,11 +85,11 @@ WSGI_APPLICATION = "peds_edu.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",  # Force MySQL
-        "NAME": "patient_portal_live",
-        "USER": "patient_portal_root",
-        "PASSWORD": "R$KG5yIaHZH8B",
-        "HOST": "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
-        "PORT": "3306",
+        "NAME": env("DB_NAME", "peds_edu"),
+        "USER": env("DB_USER", "peds_edu"),
+        "PASSWORD": env("DB_PASSWORD", "Bv9ALOgzFszxDYso"),
+        "HOST": env("DB_HOST", "35.154.221.92"),
+        "PORT": env("DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},
     }
 }
@@ -265,7 +265,7 @@ import os
 # SSO consume configuration (Project2)
 # ---------------------------------------------------------------------
 
-SSO_USE_ENV = False  # TEMP: set True later when you can configure server env vars
+SSO_USE_ENV = env("SSO_USE_ENV", "1") == "1"
 
 
 def _sso_setting(name: str, default):
@@ -327,7 +327,7 @@ MASTER_DB_CAMPAIGN_ID_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_ID_COLUMN", "campai
 MASTER_DB_CAMPAIGN_DOCTORS_SUPPORTED_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_DOCTORS_SUPPORTED_COLUMN", "doctors_supported").strip()
 MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN", "wa_addition").strip()
 MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN", "new_video_cluster_name").strip()
-MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN", "recruitment_mail_format").strip()
+MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN = os.getenv("MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN", "email_registration").strip()
 
 # Public base URL used for absolute links
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://portal.cpdinclinic.co.in").rstrip("/")
@@ -376,9 +376,9 @@ MASTER_DB_CAMPAIGN_ID_COLUMN = "id"
 MASTER_DB_CAMPAIGN_DOCTORS_SUPPORTED_COLUMN = "num_doctors_supported"
 MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN = "add_to_campaign_message"   # used as wa_addition in Project2 flow
 MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN = "name"                    # used as new_video_cluster_name in Project2 flow
-MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN = "recruitment_mail_format"   # used as email_registration in Project2 flow
+MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN = "register_message"   # used as email_registration in Project2 flow
 
-PUBLIC_BASE_URL = "https://portal.cpdinclinic.co.in"
+PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", APP_BASE_URL).rstrip("/")
 
 
 # -----------------------------
@@ -437,7 +437,58 @@ if MASTER_DB_SECRET_NAME:
     secret_raw = (get_secret_string(MASTER_DB_SECRET_NAME, region_name=MASTER_DB_REGION) or "").strip()
     _master_secret_cfg = _parse_master_db_secret(secret_raw)
 
-# Always define the alias so the code can use connections[settings.MASTER_DB_ALIAS].
+def _first_nonempty(*values: str) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+# Final, env-aware MASTER DB connection.
+# Keep this block last so local/demo env vars can override earlier hard-coded defaults.
+MASTER_DB_ENGINE = env("MASTER_DB_ENGINE", "django.db.backends.mysql").strip()
+MASTER_DB_HOST = _first_nonempty(
+    _master_secret_cfg.get("HOST", ""),
+    env("MASTER_DB_HOST", ""),
+    "127.0.0.1",
+)
+MASTER_DB_PORT = _first_nonempty(
+    _master_secret_cfg.get("PORT", ""),
+    env("MASTER_DB_PORT", ""),
+    "3306",
+)
+MASTER_DB_NAME = _first_nonempty(
+    _master_secret_cfg.get("NAME", ""),
+    MASTER_DB_NAME,
+    "healthcare_forms_2",
+)
+MASTER_DB_USER = _first_nonempty(
+    _master_secret_cfg.get("USER", ""),
+    env("MASTER_DB_USER", ""),
+    "admin",
+)
+MASTER_DB_PASSWORD = _first_nonempty(
+    _master_secret_cfg.get("PASSWORD", ""),
+    env("MASTER_DB_PASSWORD", ""),
+    "Hemsod-vytsew-7qypxa",
+)
+
+if MASTER_DB_ENGINE.endswith("sqlite3"):
+    DATABASES[MASTER_DB_ALIAS] = {
+        "ENGINE": MASTER_DB_ENGINE,
+        "NAME": MASTER_DB_NAME or str(BASE_DIR / "master.sqlite3"),
+    }
+else:
+    DATABASES[MASTER_DB_ALIAS] = {
+        "ENGINE": MASTER_DB_ENGINE,
+        "NAME": MASTER_DB_NAME,
+        "USER": MASTER_DB_USER,
+        "PASSWORD": MASTER_DB_PASSWORD,
+        "HOST": MASTER_DB_HOST,
+        "PORT": MASTER_DB_PORT,
+        "OPTIONS": {"charset": "utf8mb4"},
+        "CONN_MAX_AGE": 60,
+    }
 
 # Optional: if your master DB uses different column names, override mapping here
 MASTER_DOCTOR_FIELD_MAP = {
