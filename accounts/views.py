@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login, logout
@@ -10,9 +12,10 @@ from django.http import HttpResponseForbidden, HttpResponseServerError
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.encoding import force_bytes
-from django.utils.http import urlsafe_base64_encode
+from django.utils.http import url_has_allowed_host_and_scheme, urlsafe_base64_encode
 
 from .forms import DoctorRegistrationForm, DoctorClinicDetailsForm, EmailAuthenticationForm, DoctorSetPasswordForm
+from .forms import normalize_login_identifier
 from .pincode_directory import IndiaPincodeDirectoryNotReady, get_state_and_district_for_pincode, get_state_for_pincode
 
 from publisher.models import Campaign
@@ -37,9 +40,61 @@ from sharing.support_widget import get_support_page
 # Utilities
 # ---------------------------------------------------------------------
 
+POST_LOGIN_REDIRECT_SESSION_KEY = "post_login_redirect"
+
+
 def _build_absolute_url(path: str) -> str:
     base = (settings.SITE_BASE_URL or "").rstrip("/")
     return f"{base}{path}"
+
+
+def _safe_local_redirect_target(request, value: str) -> str:
+    target = (value or "").strip()
+    if not target:
+        return ""
+    if url_has_allowed_host_and_scheme(
+        target,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return target
+    return ""
+
+
+def _campaign_setup_redirect_target(request) -> str:
+    next_target = _safe_local_redirect_target(
+        request,
+        request.POST.get("next") or request.GET.get("next") or "",
+    )
+    if next_target:
+        return next_target
+
+    pending = ""
+    try:
+        pending = request.session.pop(POST_LOGIN_REDIRECT_SESSION_KEY, "") or ""
+    except Exception:
+        pending = ""
+
+    pending_target = _safe_local_redirect_target(request, pending)
+    if pending_target:
+        request.session.modified = True
+        return pending_target
+
+    campaign_id = (
+        request.POST.get("campaign_id")
+        or request.GET.get("campaign-id")
+        or request.GET.get("campaign_id")
+        or request.session.get(getattr(settings, "SSO_SESSION_KEY_CAMPAIGN", "campaign_id"))
+        or ""
+    )
+    campaign_id = str(campaign_id).strip()
+    if campaign_id:
+        return (
+            f"{reverse('campaign_publisher:publisher_landing_page')}?"
+            f"{urlencode({'campaign-id': campaign_id})}"
+        )
+
+    return ""
 
 
 def _send_doctor_links_email(doctor: DoctorProfile, campaign_id: str | None = None, password_setup: bool = True) -> bool:
@@ -62,7 +117,7 @@ def _send_doctor_links_email(doctor: DoctorProfile, campaign_id: str | None = No
     fallback_lines = [
         f"Hello {doctor.user.full_name or doctor.user.email},",
         "",
-        "Your clinic has access to the Patient Education portal.",
+        "Your clinic has access to the CPD in Clinic portal.",
         "",
         f"Clinic link (doctor/staff sharing screen): {clinic_link}",
         f"Login link: {login_link}",
@@ -135,7 +190,7 @@ def _send_doctor_links_email(doctor: DoctorProfile, campaign_id: str | None = No
         body = f"{body.rstrip()}\n\nNeed help? Open doctor support here:\n{support_link}"
 
     return send_email_via_sendgrid(
-        subject="Login Credentials - Patient Education System",
+        subject="CPD in Clinic portal access",
         to_emails=[doctor.user.email],
         plain_text_content=body,
     )
@@ -824,7 +879,7 @@ def doctor_login(request):
       2) If not matched, falls back to existing portal auth (publisher/staff/users with doctor_profile).
     """
     if request.method == "POST":
-        email = (request.POST.get("username") or "").strip().lower()
+        email = normalize_login_identifier(request.POST.get("username") or "")
         raw_password = (request.POST.get("password") or "").strip()
 
         # 1) Try master DB auth first
@@ -850,6 +905,9 @@ def doctor_login(request):
                 request.session["master_login_email"] = master_auth.login_email
                 request.session["master_login_role"] = master_auth.role
 
+                next_target = _campaign_setup_redirect_target(request)
+                if next_target:
+                    return redirect(next_target)
                 return redirect("sharing:doctor_share", doctor_id=master_auth.doctor_id)
 
         # 2) Fall back to existing local auth
@@ -863,9 +921,16 @@ def doctor_login(request):
                 request.session["master_doctor_id"] = doctor.doctor_id
                 request.session["master_login_email"] = user.email or ""
                 request.session["master_login_role"] = "doctor"
+                next_target = _campaign_setup_redirect_target(request)
+                if next_target:
+                    return redirect(next_target)
                 return redirect("sharing:doctor_share", doctor_id=doctor.doctor_id)
 
-            return redirect("publisher:dashboard")
+            next_target = _campaign_setup_redirect_target(request)
+            if next_target:
+                return redirect(next_target)
+
+            return redirect("campaign_publisher:campaign_list")
 
         messages.error(request, "Invalid login.")
     else:
@@ -963,7 +1028,7 @@ def request_password_reset(request):
             stored = get_stored_password_for_role(ident.row, ident.role)
 
             password_to_send = None
-            email_subject = "Login Credentials - Patient Education System"
+            email_subject = "Your CPD in Clinic portal login password"
             greeting_name = (ident.display_name or email).strip()
 
             # If the DB stores plaintext, you *can* email it (as requested).
@@ -1007,7 +1072,7 @@ def request_password_reset(request):
                 body_lines = [
                     f"Hello {greeting_name},",
                     "",
-                    "Use the password below to login to the Patient Education portal:",
+                    "Use the password below to login to the CPD in Clinic portal:",
                     "",
                     f"Password: {password_to_send}",
                     "",
@@ -1132,7 +1197,7 @@ def _send_master_doctor_access_email(
         lines = [
             f"Hello {full_name},",
             "",
-            "Your Patient Education portal account has been created.",
+            "Your CPD in Clinic portal account has been created.",
             "",
             f"Doctor ID: {doctor_id}",
             f"Login link: {login_link}",
@@ -1152,7 +1217,7 @@ def _send_master_doctor_access_email(
         body = "\n".join(lines)
 
     return send_email_via_sendgrid(
-        subject="Login Credentials - Patient Education System",
+        subject="CPD in Clinic portal access",
         to_emails=[to_email],
         plain_text_content=body,
     )

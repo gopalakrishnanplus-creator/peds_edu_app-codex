@@ -134,8 +134,21 @@ class DoctorClinicDetailsForm(forms.Form):
     photo = forms.ImageField(label="Doctor Photo (optional)", required=False)
 
 
+LOCAL_LOGIN_ALIASES = {
+    "admin": "admin@pedsedu.local",
+}
+
+
+def normalize_login_identifier(value: str) -> str:
+    identifier = (value or "").strip().lower()
+    return LOCAL_LOGIN_ALIASES.get(identifier, identifier)
+
+
 class EmailAuthenticationForm(AuthenticationForm):
-    username = forms.EmailField(label="Email")
+    username = forms.CharField(label="Username or email")
+
+    def clean_username(self):
+        return normalize_login_identifier(self.cleaned_data["username"])
 
 
 class DoctorSetPasswordForm(SetPasswordForm):

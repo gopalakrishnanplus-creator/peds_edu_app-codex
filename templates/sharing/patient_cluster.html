@@ -88,7 +88,8 @@
                   data-doctor-id="{{ doctor.doctor_id }}"
                   data-doctor-name="{{ doctor.user.full_name }}"
                   data-clinic-name="{{ clinic.display_name }}"
-                  referrerpolicy="strict-origin-when-cross-origin"
+                  title="{{ it.title }}"
+                  referrerpolicy="origin-when-cross-origin"
                   loading="lazy"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                   allowfullscreen
@@ -130,19 +131,34 @@
 (function () {
   const playbackEventUrl = "{% url 'sharing:log_playback_event' %}";
 
+  function extractYouTubeVideoId(rawUrl) {
+    const directMatch = rawUrl.match(/(?:youtube(?:-nocookie)?\.com\/(?:embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+    if (directMatch) {
+      return directMatch[1];
+    }
+
+    try {
+      const parsedUrl = new URL(rawUrl);
+      const videoId = parsedUrl.searchParams.get("v");
+      return /^[A-Za-z0-9_-]{11}$/.test(videoId || "") ? videoId : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
   function toEmbedSrc(videoId) {
     const params = new URLSearchParams({
       rel: "0",
       modestbranding: "1",
       iv_load_policy: "3",
       playsinline: "1",
-      disablekb: "1",
       controls: "1",
       fs: "1",
       enablejsapi: "1",
-      origin: window.location.origin
+      origin: window.location.origin,
+      widget_referrer: window.location.origin
     });
-    return "https://www.youtube-nocookie.com/embed/" + videoId + "?" + params.toString();
+    return "https://www.youtube.com/embed/" + videoId + "?" + params.toString();
   }
 
   function getCookie(name) {
@@ -180,11 +196,9 @@
     const rawUrl = iframe.dataset.youtubeUrl || "";
     const fallback = iframe.nextElementSibling;
 
-    const match = rawUrl.match(
-      /(?:youtube\.com\/watch\?v=|youtube\.com\/embed\/|youtube-nocookie\.com\/embed\/|youtu\.be\/)([A-Za-z0-9_-]{11})/
-    );
+    const videoId = extractYouTubeVideoId(rawUrl);
 
-    if (!match) {
+    if (!videoId) {
       iframe.hidden = true;
       if (fallback) {
         fallback.hidden = false;
@@ -192,7 +206,7 @@
       return;
     }
 
-    iframe.src = toEmbedSrc(match[1]);
+    iframe.src = toEmbedSrc(videoId);
     playersToTrack.push(iframe);
 
     iframe.addEventListener("error", function () {

@@ -3,15 +3,84 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect
+from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_http_methods
 
 from .jwt import decode_and_verify_hs256_jwt, JWTError
+
+
+POST_LOGIN_REDIRECT_SESSION_KEY = "post_login_redirect"
+
+
+def _is_staff_or_superuser(request) -> bool:
+    user = getattr(request, "user", None)
+    return bool(
+        user
+        and getattr(user, "is_authenticated", False)
+        and (getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+    )
+
+
+def _safe_next_url(request, next_url: str) -> str:
+    target = (next_url or "/").strip() or "/"
+    if url_has_allowed_host_and_scheme(
+        target,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return target
+    return "/"
+
+
+def _staff_identity(request) -> dict:
+    user = getattr(request, "user", None)
+    email = (getattr(user, "email", "") or "").strip().lower()
+    return {
+        "sub": f"django-user:{getattr(user, 'pk', '')}",
+        "username": email or str(user),
+        "roles": ["publisher", "admin"],
+        "iss": "django_staff",
+        "aud": getattr(settings, "SSO_EXPECTED_AUDIENCE", "project2"),
+        "email": email,
+        "publisher_email": email,
+        "auth_source": "django_staff",
+    }
+
+
+def _set_publisher_session(request, *, identity: dict, campaign_id: str) -> None:
+    request.session[getattr(settings, "SSO_SESSION_KEY_IDENTITY", "sso_identity")] = identity
+    request.session[getattr(settings, "SSO_SESSION_KEY_CAMPAIGN", "campaign_id")] = str(campaign_id)
+    if hasattr(request.session, "set_expiry"):
+        request.session.set_expiry(getattr(settings, "SSO_SESSION_AGE_SECONDS", 3600))
+    request.session.modified = True
+
+
+def _store_pending_campaign_redirect(request, *, campaign_id: str, next_url: str) -> str:
+    safe_next = _safe_next_url(request, next_url)
+    request.session[getattr(settings, "SSO_SESSION_KEY_CAMPAIGN", "campaign_id")] = str(campaign_id)
+    request.session[POST_LOGIN_REDIRECT_SESSION_KEY] = safe_next
+    request.session.modified = True
+    return safe_next
+
+
+def _redirect_to_login_for_campaign(request, *, campaign_id: str, next_url: str) -> HttpResponse:
+    safe_next = _store_pending_campaign_redirect(
+        request,
+        campaign_id=campaign_id,
+        next_url=next_url,
+    )
+    messages.info(request, "Please log in to continue campaign setup.")
+    login_url = reverse("accounts:login")
+    if safe_next:
+        login_url = f"{login_url}?{urlencode({'next': safe_next})}"
+    return redirect(login_url)
 
 
 @require_http_methods(["GET"])
@@ -98,6 +167,23 @@ def consume(request):
         messages.error(request, "Missing token or campaign_id.")
         return _debug_response(final=True) or redirect("/")
 
+    if _is_staff_or_superuser(request):
+        campaign_id_value = campaign_id_raw
+        try:
+            campaign_id_value = str(uuid.UUID(campaign_id_raw))
+            _debug("campaign_id normalized to UUID")
+        except Exception:
+            _debug("campaign_id treated as string")
+
+        _set_publisher_session(
+            request,
+            identity=_staff_identity(request),
+            campaign_id=campaign_id_value,
+        )
+        safe_next = _safe_next_url(request, next_url)
+        _log("sso.consume.staff_session_set", next_url=safe_next)
+        return _debug_response(final=True) or redirect(safe_next)
+
     if not getattr(settings, "SSO_SHARED_SECRET", ""):
         _debug("FAIL: SSO_SHARED_SECRET not configured")
         _log("sso.consume.misconfigured")
@@ -118,9 +204,15 @@ def consume(request):
     except JWTError as e:
         _debug(f"FAIL: JWT error ({e.__class__.__name__})")
         _log("sso.consume.jwt_error", error=str(e))
+        if campaign_id_raw:
+            return _debug_response(final=True) or _redirect_to_login_for_campaign(
+                request,
+                campaign_id=campaign_id_raw,
+                next_url=next_url,
+            )
         messages.error(
             request,
-            "SSO link is invalid or expired. Please reopen it from the publisher portal."
+            "SSO link is invalid or expired. Please reopen it from the publisher portal.",
         )
         return _debug_response(final=True) or redirect("/")
 
@@ -175,23 +267,19 @@ def consume(request):
     # ------------------------------------------------------------------
     # Create Project2 session
     # ------------------------------------------------------------------
-    request.session[getattr(settings, "SSO_SESSION_KEY_IDENTITY", "sso_identity")] = {
-        "sub": sub,
-        "username": username,
-        "roles": roles,
-        "iss": payload.get("iss"),
-        "aud": payload.get("aud"),
-        "email": (payload.get("email") or "").strip(),
-        "publisher_email": (payload.get("publisher_email") or "").strip(),
-    }
-    request.session[getattr(settings, "SSO_SESSION_KEY_CAMPAIGN", "campaign_id")] = str(
-        campaign_id_value
+    _set_publisher_session(
+        request,
+        identity={
+            "sub": sub,
+            "username": username,
+            "roles": roles,
+            "iss": payload.get("iss"),
+            "aud": payload.get("aud"),
+            "email": (payload.get("email") or "").strip(),
+            "publisher_email": (payload.get("publisher_email") or "").strip(),
+        },
+        campaign_id=str(campaign_id_value),
     )
-
-    request.session.set_expiry(
-        getattr(settings, "SSO_SESSION_AGE_SECONDS", 3600)
-    )
-    request.session.modified = True
 
     _debug("Session created successfully")
     _log(

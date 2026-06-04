@@ -71,7 +71,8 @@
           data-doctor-id="{{ doctor.doctor_id }}"
           data-doctor-name="{{ doctor.user.full_name }}"
           data-clinic-name="{{ clinic.display_name }}"
-          referrerpolicy="strict-origin-when-cross-origin"
+          title="{{ vlang.title|default:video.code }}"
+          referrerpolicy="origin-when-cross-origin"
           loading="lazy"
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           allowfullscreen
@@ -108,31 +109,46 @@
   }
   const playbackEventUrl = "{% url 'sharing:log_playback_event' %}";
 
-  const rawUrl = iframe.dataset.youtubeUrl || "";
-  const match = rawUrl.match(
-    /(?:youtube\.com\/watch\?v=|youtube\.com\/embed\/|youtube-nocookie\.com\/embed\/|youtu\.be\/)([A-Za-z0-9_-]{11})/
-  );
-
-  if (!match) {
-    iframe.hidden = true;
-    if (fallback) {
-      fallback.hidden = false;
+  function extractYouTubeVideoId(rawUrl) {
+    const directMatch = rawUrl.match(/(?:youtube(?:-nocookie)?\.com\/(?:embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+    if (directMatch) {
+      return directMatch[1];
     }
-  } else {
-    const videoId = match[1];
+
+    try {
+      const parsedUrl = new URL(rawUrl);
+      const videoId = parsedUrl.searchParams.get("v");
+      return /^[A-Za-z0-9_-]{11}$/.test(videoId || "") ? videoId : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function buildYouTubeEmbedSrc(videoId) {
     const params = new URLSearchParams({
       rel: "0",
       modestbranding: "1",
       iv_load_policy: "3",
       playsinline: "1",
-      disablekb: "1",
       controls: "1",
       fs: "1",
       enablejsapi: "1",
-      origin: window.location.origin
+      origin: window.location.origin,
+      widget_referrer: window.location.origin
     });
+    return "https://www.youtube.com/embed/" + videoId + "?" + params.toString();
+  }
 
-    iframe.src = "https://www.youtube-nocookie.com/embed/" + videoId + "?" + params.toString();
+  const rawUrl = iframe.dataset.youtubeUrl || "";
+  const videoId = extractYouTubeVideoId(rawUrl);
+
+  if (!videoId) {
+    iframe.hidden = true;
+    if (fallback) {
+      fallback.hidden = false;
+    }
+  } else {
+    iframe.src = buildYouTubeEmbedSrc(videoId);
 
     iframe.addEventListener("error", function () {
       iframe.hidden = true;
@@ -175,7 +191,7 @@
     if (iframe.dataset.playerInitialized === "1") {
       return;
     }
-    if (!window.YT || !window.YT.Player || !match) {
+    if (!window.YT || !window.YT.Player || !videoId) {
       return;
     }
     iframe.dataset.playerInitialized = "1";
@@ -249,7 +265,7 @@
     });
   }
 
-  if (match) {
+  if (videoId) {
     if (window.YT && window.YT.Player) {
       trackVideoPlayback();
     } else {

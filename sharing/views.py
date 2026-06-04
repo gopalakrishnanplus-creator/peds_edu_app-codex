@@ -25,6 +25,20 @@ from peds_edu.master_db import (
     unsign_patient_payload,
     fetch_pe_campaign_support_for_doctor_email,
 )
+from pe_migration.models import (
+    PeBannerClickEventV2,
+    PeCampaignV2,
+    PeDoctorShareSummaryV2,
+    PePlaybackEventV2,
+    PeShareEventV2,
+)
+from pe_migration.services import normalize_campaign_id
+from pe_migration.live_sync import (
+    record_banner_click_event_v2,
+    record_playback_event_v2,
+    record_share_activity_v2,
+)
+from pe_migration.runtime import is_v2_enabled
 
 from .models import (
     DoctorShareSummary,
@@ -215,6 +229,17 @@ def home(request: HttpRequest) -> HttpResponse:
 # Campaign bundle helpers (read-only)
 # -----------------------
 def _fetch_all_campaign_bundle_codes() -> set[str]:
+    if is_v2_enabled():
+        cluster_ids = list(
+            PeCampaignV2.objects.filter(is_current=True, video_cluster_id__isnull=False).values_list(
+                "video_cluster_id",
+                flat=True,
+            )
+        )
+        return set(
+            VideoCluster.objects.filter(id__in=cluster_ids).values_list("code", flat=True)
+        )
+
     try:
         with connections["default"].cursor() as cur:
             cur.execute(
@@ -232,9 +257,21 @@ def _fetch_all_campaign_bundle_codes() -> set[str]:
 
 
 def _fetch_allowed_bundle_codes_for_campaigns(campaign_ids: list[str]) -> set[str]:
-    ids = [str(c).strip().replace("-", "") for c in (campaign_ids or []) if str(c).strip()]
+    ids = [normalize_campaign_id(c) for c in (campaign_ids or []) if str(c).strip()]
     if not ids:
         return set()
+
+    if is_v2_enabled():
+        cluster_ids = list(
+            PeCampaignV2.objects.filter(
+                is_current=True,
+                pe_campaign_id_normalized__in=ids,
+                video_cluster_id__isnull=False,
+            ).values_list("video_cluster_id", flat=True)
+        )
+        return set(
+            VideoCluster.objects.filter(id__in=cluster_ids).values_list("code", flat=True)
+        )
 
     placeholders = ", ".join(["%s"] * len(ids))
     sql = f"""
@@ -530,6 +567,29 @@ def create_share_activity(request: HttpRequest) -> HttpResponse:
     if not recipient_reference:
         return JsonResponse({"ok": False, "error": "recipient_identifier is invalid."}, status=400)
 
+    if is_v2_enabled():
+        with transaction.atomic():
+            share, created = record_share_activity_v2(
+                public_id=share_public_id,
+                doctor_id=doctor_id,
+                doctor_name=doctor_name,
+                clinic_name=clinic_name,
+                shared_by_role=str(request.session.get("master_login_role") or "").strip(),
+                shared_item_type=shared_item_type,
+                shared_item_code=shared_item_code,
+                shared_item_name=shared_item_name,
+                language_code=language_code,
+                recipient_reference=recipient_reference,
+            )
+        return JsonResponse(
+            {
+                "ok": True,
+                "created": created,
+                "share_public_id": str(share.public_id),
+                "shared_item_name": share.shared_item_name,
+            }
+        )
+
     summary = _get_or_create_doctor_share_summary(
         doctor_id=doctor_id,
         doctor_name=doctor_name,
@@ -600,6 +660,52 @@ def log_playback_event(request: HttpRequest) -> HttpResponse:
     share = None
     doctor_summary = None
     doctor_id = ""
+    if share_public_id and is_v2_enabled():
+        share_v2 = PeShareEventV2.objects.filter(is_current=True, public_id=str(share_public_id)).first()
+        if share_v2:
+            doctor_id = share_v2.doctor_id
+            doctor_name = share_v2.doctor_name_snapshot
+            clinic_name = share_v2.clinic_name_snapshot
+        else:
+            doctor_id = str(payload.get("doctor_id") or "").strip()
+            doctor_name = str(payload.get("doctor_name") or "").strip()
+            clinic_name = str(payload.get("clinic_name") or "").strip()
+        if not doctor_id:
+            return JsonResponse({"ok": False, "error": "doctor_id is required when share is unknown."}, status=400)
+        with transaction.atomic():
+            record_playback_event_v2(
+                share_public_id=share_public_id,
+                doctor_id=doctor_id,
+                doctor_name=doctor_name,
+                clinic_name=clinic_name,
+                page_item_type=page_item_type,
+                event_type=event_type,
+                video_code=video_code,
+                video_name=video_name,
+                milestone_percent=milestone_percent,
+            )
+        return JsonResponse({"ok": True})
+
+    if is_v2_enabled():
+        doctor_id = str(payload.get("doctor_id") or "").strip()
+        doctor_name = str(payload.get("doctor_name") or "").strip()
+        clinic_name = str(payload.get("clinic_name") or "").strip()
+        if not doctor_id:
+            return JsonResponse({"ok": False, "error": "doctor_id is required when share is unknown."}, status=400)
+        with transaction.atomic():
+            record_playback_event_v2(
+                share_public_id=share_public_id,
+                doctor_id=doctor_id,
+                doctor_name=doctor_name,
+                clinic_name=clinic_name,
+                page_item_type=page_item_type,
+                event_type=event_type,
+                video_code=video_code,
+                video_name=video_name,
+                milestone_percent=milestone_percent,
+            )
+        return JsonResponse({"ok": True})
+
     if share_public_id:
         share = ShareActivity.objects.select_related("doctor_summary").filter(public_id=share_public_id).first()
 
@@ -618,17 +724,18 @@ def log_playback_event(request: HttpRequest) -> HttpResponse:
             clinic_name=clinic_name,
         )
 
-    SharePlaybackEvent.objects.create(
-        share=share,
-        share_public_id=share_public_id,
-        doctor_summary=doctor_summary,
-        doctor_id=doctor_id,
-        page_item_type=page_item_type,
-        event_type=event_type,
-        video_code=video_code,
-        video_name=video_name,
-        milestone_percent=milestone_percent,
-    )
+    with transaction.atomic():
+        event = SharePlaybackEvent.objects.create(
+            share=share,
+            share_public_id=share_public_id,
+            doctor_summary=doctor_summary,
+            doctor_id=doctor_id,
+            page_item_type=page_item_type,
+            event_type=event_type,
+            video_code=video_code,
+            video_name=video_name,
+            milestone_percent=milestone_percent,
+        )
 
     return JsonResponse({"ok": True})
 
@@ -657,20 +764,34 @@ def log_banner_click(request: HttpRequest) -> HttpResponse:
     if not banner_id and not banner_name:
         return JsonResponse({"ok": False, "error": "banner_id or banner_name is required."}, status=400)
 
+    if is_v2_enabled():
+        with transaction.atomic():
+            click = record_banner_click_event_v2(
+                doctor_id=doctor_id,
+                doctor_name=doctor_name,
+                clinic_name=clinic_name,
+                page_type=page_type,
+                banner_id=banner_id,
+                banner_name=banner_name,
+                banner_target_url=banner_target_url,
+            )
+        return JsonResponse({"ok": True, "click_id": click.pk})
+
     summary = _get_or_create_doctor_share_summary(
         doctor_id=doctor_id,
         doctor_name=doctor_name,
         clinic_name=clinic_name,
     )
 
-    click = ShareBannerClickEvent.objects.create(
-        doctor_summary=summary,
-        doctor_id=doctor_id,
-        page_type=page_type,
-        banner_id=banner_id,
-        banner_name=banner_name,
-        banner_target_url=banner_target_url,
-    )
+    with transaction.atomic():
+        click = ShareBannerClickEvent.objects.create(
+            doctor_summary=summary,
+            doctor_id=doctor_id,
+            page_type=page_type,
+            banner_id=banner_id,
+            banner_name=banner_name,
+            banner_target_url=banner_target_url,
+        )
 
     return JsonResponse({"ok": True, "click_id": click.pk})
 
@@ -704,18 +825,31 @@ def tracking_dashboard(request: HttpRequest) -> HttpResponse:
     if not _is_tracking_audit_user(request.user):
         return HttpResponseForbidden("Not allowed")
 
-    summary_rows = DoctorShareSummary.objects.order_by("-total_shares", "doctor_id")
-    recent_shares = ShareActivity.objects.select_related("doctor_summary").order_by("-shared_at")[:100]
-    recent_playback = SharePlaybackEvent.objects.select_related("doctor_summary", "share").order_by("-occurred_at")[:100]
-    recent_banner_clicks = ShareBannerClickEvent.objects.select_related("doctor_summary").order_by("-clicked_at")[:100]
-
-    stats = {
-        "doctor_count": summary_rows.count(),
-        "share_count": ShareActivity.objects.count(),
-        "playback_event_count": SharePlaybackEvent.objects.count(),
-        "banner_click_count": ShareBannerClickEvent.objects.count(),
-        "unique_items_shared": ShareActivity.objects.values("shared_item_type", "shared_item_code").distinct().count(),
-    }
+    if is_v2_enabled():
+        summary_rows = PeDoctorShareSummaryV2.objects.filter(is_current=True).order_by("-total_shares", "doctor_id")
+        recent_shares = PeShareEventV2.objects.filter(is_current=True).order_by("-shared_at")[:100]
+        recent_playback = PePlaybackEventV2.objects.filter(is_current=True).order_by("-occurred_at")[:100]
+        recent_banner_clicks = PeBannerClickEventV2.objects.filter(is_current=True).order_by("-clicked_at")[:100]
+        share_rows = PeShareEventV2.objects.filter(is_current=True)
+        stats = {
+            "doctor_count": summary_rows.count(),
+            "share_count": share_rows.count(),
+            "playback_event_count": PePlaybackEventV2.objects.filter(is_current=True).count(),
+            "banner_click_count": PeBannerClickEventV2.objects.filter(is_current=True).count(),
+            "unique_items_shared": share_rows.values("shared_item_type", "shared_item_code").distinct().count(),
+        }
+    else:
+        summary_rows = DoctorShareSummary.objects.order_by("-total_shares", "doctor_id")
+        recent_shares = ShareActivity.objects.select_related("doctor_summary").order_by("-shared_at")[:100]
+        recent_playback = SharePlaybackEvent.objects.select_related("doctor_summary", "share").order_by("-occurred_at")[:100]
+        recent_banner_clicks = ShareBannerClickEvent.objects.select_related("doctor_summary").order_by("-clicked_at")[:100]
+        stats = {
+            "doctor_count": summary_rows.count(),
+            "share_count": ShareActivity.objects.count(),
+            "playback_event_count": SharePlaybackEvent.objects.count(),
+            "banner_click_count": ShareBannerClickEvent.objects.count(),
+            "unique_items_shared": ShareActivity.objects.values("shared_item_type", "shared_item_code").distinct().count(),
+        }
 
     return render(
         request,

@@ -18,8 +18,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 CSRF_TRUSTED_ORIGINS = [
-    'http://portal.cpdinclinic.co.in',
-    'https://portal.cpdinclinic.co.in',
+    "https://portal.cpdinclinic.co.in",
+    "https://www.portal.cpdinclinic.co.in",
+    "http://3.6.101.52",
+    "http://127.0.0.1:3007",
+    "http://localhost:3007",
 ]
 
 
@@ -46,6 +49,7 @@ INSTALLED_APPS = [
     "catalog.apps.CatalogConfig",
     "sharing.apps.SharingConfig",
     "publisher.apps.PublisherConfig",
+    "pe_migration.apps.PeMigrationConfig",
     "sso.apps.SsoConfig",
 ]
 
@@ -87,13 +91,12 @@ DATABASES = {
         "ENGINE": "django.db.backends.mysql",  # Force MySQL
         "NAME": env("DB_NAME", "peds_edu"),
         "USER": env("DB_USER", "peds_edu"),
-        "PASSWORD": env("DB_PASSWORD", "Bv9ALOgzFszxDYso"),
+        "PASSWORD": env("DB_PASSWORD", ""),
         "HOST": env("DB_HOST", "35.154.221.92"),
         "PORT": env("DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},
     }
 }
-
 
 # ---------------------------------------------------------------------
 # MASTER FORMS DB (Project1 master DB) - new-forms-rds
@@ -101,12 +104,11 @@ DATABASES = {
 
 MASTER_DB_ALIAS = "master"
 
-# ❌ Do NOT use env or secrets
 MASTER_DB_ENGINE = "django.db.backends.mysql"
-MASTER_DB_NAME = "healthcare_forms_2"
-MASTER_DB_USER = "admin"
-MASTER_DB_PASSWORD = "fizxyZ-rovpat-memri5"
-MASTER_DB_HOST = "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com"
+MASTER_DB_NAME = "YOUR_DATABASE_NAME"
+MASTER_DB_USER = "root"
+MASTER_DB_PASSWORD = ""
+MASTER_DB_HOST = "new-forms-rds.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com"
 MASTER_DB_PORT = "3306"
 
 # Table/column config (leave as-is unless schema differs)
@@ -175,8 +177,15 @@ CSRF_COOKIE_SECURE = env("CSRF_COOKIE_SECURE", "0") == "1"
 SESSION_COOKIE_SECURE = env("SESSION_COOKIE_SECURE", "0") == "1"
 SECURE_SSL_REDIRECT = env("SECURE_SSL_REDIRECT", "0") == "1"
 
+# ---------------- LOCAL SERVICE URLS ----------------
+PE_SERVICE_HOST = env("PE_SERVICE_HOST", "127.0.0.1")
+PE_SERVICE_PORT = int(env("PE_SERVICE_PORT", "3007"))
+PE_SERVICE_URL = env("PE_SERVICE_URL", f"http://{PE_SERVICE_HOST}:{PE_SERVICE_PORT}").rstrip("/")
+INCLINIC_SERVICE_URL = env("INCLINIC_SERVICE_URL", "http://127.0.0.1:3005").rstrip("/")
+RFA_SERVICE_URL = env("RFA_SERVICE_URL", "http://127.0.0.1:3006").rstrip("/")
+
 # ---------------- APP BASE URL ----------------
-APP_BASE_URL = env("APP_BASE_URL", "https://portal.cpdinclinic.co.in").rstrip("/")
+APP_BASE_URL = env("APP_BASE_URL", PE_SERVICE_URL).rstrip("/")
 SITE_BASE_URL = APP_BASE_URL
 
 # ---------------- EMAIL / SENDGRID ----------------
@@ -285,6 +294,7 @@ SSO_SHARED_SECRET = _sso_setting(
 SSO_SESSION_AGE_SECONDS = int(_sso_setting("SSO_SESSION_AGE_SECONDS", "3600"))
 SSO_SESSION_KEY_IDENTITY = "sso_identity"
 SSO_SESSION_KEY_CAMPAIGN = "campaign_id"
+PUBLISHER_TRUST_VERIFIED_SSO = env("PUBLISHER_TRUST_VERIFIED_SSO", "1") == "1"
 
 
 # Master DB alias name used throughout the code
@@ -342,8 +352,8 @@ DATABASES[MASTER_DB_ALIAS] = {
     "ENGINE": "django.db.backends.mysql",
     "NAME": "healthcare_forms_2",
     "USER": "admin",
-    "PASSWORD": "fizxyZ-rovpat-memri5",
-    "HOST": "master-db-new-system.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
+    "PASSWORD": os.getenv("MASTER_DB_PASSWORD", ""),
+    "HOST": "new-forms-rds.cbnobb8kfeuq.ap-south-1.rds.amazonaws.com",
     "PORT": "3306",
     "OPTIONS": {"charset": "utf8mb4"},
     "CONN_MAX_AGE": 60,
@@ -378,7 +388,7 @@ MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN = "add_to_campaign_message"   # used as wa
 MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN = "name"                    # used as new_video_cluster_name in Project2 flow
 MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN = "register_message"   # used as email_registration in Project2 flow
 
-PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", APP_BASE_URL).rstrip("/")
+PUBLIC_BASE_URL = "https://portal.cpdinclinic.co.in"
 
 
 # -----------------------------
@@ -469,9 +479,10 @@ MASTER_DB_USER = _first_nonempty(
 )
 MASTER_DB_PASSWORD = _first_nonempty(
     _master_secret_cfg.get("PASSWORD", ""),
-    env("MASTER_DB_PASSWORD", ""),
-    "Hemsod-vytsew-7qypxa",
+    "",
 )
+if "MASTER_DB_PASSWORD" in os.environ and not _master_secret_cfg.get("PASSWORD", ""):
+    MASTER_DB_PASSWORD = env("MASTER_DB_PASSWORD", "").strip()
 
 if MASTER_DB_ENGINE.endswith("sqlite3"):
     DATABASES[MASTER_DB_ALIAS] = {
@@ -489,6 +500,8 @@ else:
         "OPTIONS": {"charset": "utf8mb4"},
         "CONN_MAX_AGE": 60,
     }
+
+PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", APP_BASE_URL).rstrip("/")
 
 # Optional: if your master DB uses different column names, override mapping here
 MASTER_DOCTOR_FIELD_MAP = {

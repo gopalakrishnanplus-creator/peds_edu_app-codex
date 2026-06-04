@@ -9,6 +9,10 @@ from django.core.exceptions import ValidationError
 
 class CampaignCreateForm(forms.Form):
     campaign_id = forms.CharField(widget=forms.HiddenInput())
+    publisher_form_access_token = forms.CharField(
+        widget=forms.HiddenInput(),
+        required=False,
+    )
 
     new_video_cluster_name = forms.CharField(
         max_length=255,

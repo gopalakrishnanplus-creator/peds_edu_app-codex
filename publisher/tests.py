@@ -3,12 +3,18 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.http import HttpResponse
+from django.test import RequestFactory
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 
-from accounts import master_db
+from publisher.campaign_auth import (
+    FORM_ACCESS_TOKEN_FIELD,
+    get_publisher_claims,
+    make_campaign_form_access_token,
+    publisher_required,
+)
 from publisher.forms import DoctorRecordForm, FieldRepRecordForm, MasterCampaignRecordForm
-from publisher.views import _build_pe_records_context
 
 
 class DoctorRecordFormTests(SimpleTestCase):
@@ -75,159 +81,97 @@ class MasterCampaignRecordFormTests(SimpleTestCase):
         self.assertTrue(form.is_valid(), form.errors)
 
 
-class PEDoctorMatchingTests(SimpleTestCase):
-    def test_pe_activity_matching_prefers_field_rep_aware_match(self) -> None:
-        doctor_indexes = master_db._build_doctor_candidate_indexes(
-            [
-                {
-                    "doctor_id": "DR-PE-1",
-                    "first_name": "Aarav",
-                    "last_name": "Dsouza",
-                    "email": "doctor@example.com",
-                    "whatsapp_no": "9876543210",
-                    "clinic_phone": "",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                    "field_rep_id": "FR-PE-1",
-                },
-                {
-                    "doctor_id": "DR-NONPE-1",
-                    "first_name": "Aarav",
-                    "last_name": "Dsouza",
-                    "email": "doctor@example.com",
-                    "whatsapp_no": "9876543210",
-                    "clinic_phone": "",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                    "field_rep_id": "FR-NONPE-1",
-                },
-            ]
+class PublisherCampaignAuthTests(SimpleTestCase):
+    def test_staff_user_can_open_campaign_step_with_stale_token(self) -> None:
+        request = RequestFactory().get(
+            "/add-campaign-details/?campaign-id=abc123&token=expired-token"
+        )
+        request.session = {}
+        request.user = SimpleNamespace(
+            pk=1,
+            email="admin@pedsedu.local",
+            is_authenticated=True,
+            is_staff=True,
+            is_superuser=True,
         )
 
-        matched_doctor_id = master_db._match_pe_activity_row_to_doctor(
+        @publisher_required
+        def protected_view(request):
+            return HttpResponse("ok")
+
+        response = protected_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"ok")
+
+    @override_settings(
+        PUBLISHER_TRUST_VERIFIED_SSO=True,
+        SSO_EXPECTED_ISSUER="project1",
+        SSO_EXPECTED_AUDIENCE="project2",
+        SSO_SESSION_KEY_IDENTITY="sso_identity",
+        SSO_SESSION_KEY_CAMPAIGN="campaign_id",
+    )
+    def test_campaign_form_token_authorizes_post_when_session_claims_are_missing(self) -> None:
+        campaign_id = "dc54892f-1410-4eea-b371-32c25309c604"
+        token = make_campaign_form_access_token(
+            campaign_id,
             {
-                "doctor_id": "",
-                "email": "doctor@example.com",
-                "phone": "9876543210",
-                "full_name": "Aarav Dsouza",
-                "rep_brand_id": "FR-PE-1",
+                "sub": "publisher_1",
+                "username": "khushan.poptani",
+                "roles": ["publisher"],
+                "iss": "project1",
+                "aud": "project2",
+                "email": "khushan.poptani@inditech.co.in",
             },
-            doctor_indexes,
+        )
+        request = RequestFactory().post(
+            f"/add-campaign-details/?campaign-id={campaign_id}",
+            {"campaign_id": campaign_id, FORM_ACCESS_TOKEN_FIELD: token},
+        )
+        request.session = {}
+        request.user = SimpleNamespace(is_authenticated=False)
+
+        @publisher_required
+        def protected_view(request):
+            return HttpResponse("ok")
+
+        response = protected_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"ok")
+        self.assertEqual(request.session["campaign_id"], campaign_id)
+        self.assertEqual(
+            request.session["sso_identity"]["email"],
+            "khushan.poptani@inditech.co.in",
         )
 
-        self.assertEqual(matched_doctor_id, "DR-PE-1")
-
-    def test_named_support_phone_match_excludes_unrelated_doctors(self) -> None:
-        doctor_indexes = master_db._build_doctor_candidate_indexes(
-            [
-                {
-                    "doctor_id": "DR-PE-1",
-                    "first_name": "Aarav",
-                    "last_name": "Dsouza",
-                    "email": "",
-                    "whatsapp_no": "",
-                    "clinic_phone": "02041234567",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                },
-                {
-                    "doctor_id": "DR-NONPE-1",
-                    "first_name": "Neha",
-                    "last_name": "Kapoor",
-                    "email": "",
-                    "whatsapp_no": "",
-                    "clinic_phone": "02041234567",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                },
-            ]
-        )
-
-        matched_doctor_id = master_db._match_campaign_doctor_row_to_master_doctor(
-            {
-                "email": "",
-                "phone": "02041234567",
-                "full_name": "Aarav Dsouza",
+    @override_settings(
+        PUBLISHER_TRUST_VERIFIED_SSO=True,
+        SSO_EXPECTED_ISSUER="project1",
+        SSO_EXPECTED_AUDIENCE="project2",
+        SSO_SESSION_KEY_IDENTITY="sso_identity",
+        SSO_SESSION_KEY_CAMPAIGN="campaign_id",
+    )
+    @patch("publisher.campaign_auth.master_db.authorized_publisher_exists", return_value=False)
+    def test_verified_rfa_sso_identity_is_authorized_without_local_allowlist(self, authorized_mock) -> None:
+        request = RequestFactory().get("/publisher-landing-page/")
+        request.session = {
+            "sso_identity": {
+                "sub": "publisher_1",
+                "username": "khushan.poptani",
+                "roles": ["publisher"],
+                "iss": "project1",
+                "aud": "project2",
+                "email": "khushan.poptani@inditech.co.in",
             },
-            doctor_indexes,
-        )
+            "campaign_id": "dc54892f-1410-4eea-b371-32c25309c604",
+        }
+        request.user = SimpleNamespace(is_authenticated=False)
 
-        self.assertEqual(matched_doctor_id, "DR-PE-1")
+        claims = get_publisher_claims(request)
 
-    def test_ambiguous_phone_only_match_is_rejected(self) -> None:
-        doctor_indexes = master_db._build_doctor_candidate_indexes(
-            [
-                {
-                    "doctor_id": "DR-PE-1",
-                    "first_name": "Aarav",
-                    "last_name": "Dsouza",
-                    "email": "",
-                    "whatsapp_no": "9876543210",
-                    "clinic_phone": "",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                },
-                {
-                    "doctor_id": "DR-NONPE-1",
-                    "first_name": "Neha",
-                    "last_name": "Kapoor",
-                    "email": "",
-                    "whatsapp_no": "9876543210",
-                    "clinic_phone": "",
-                    "clinic_appointment_number": "",
-                    "receptionist_whatsapp_number": "",
-                },
-            ]
-        )
-
-        matched_doctor_id = master_db._match_campaign_doctor_row_to_master_doctor(
-            {
-                "email": "",
-                "phone": "9876543210",
-                "full_name": "",
-            },
-            doctor_indexes,
-        )
-
-        self.assertIsNone(matched_doctor_id)
-
-
-class PERecordsContextTests(SimpleTestCase):
-    @patch("publisher.views.DoctorProfile.objects")
-    @patch("publisher.views.master_db.list_pe_doctor_records")
-    @patch("publisher.views.master_db.list_pe_field_rep_records")
-    @patch("publisher.views._build_local_campaign_map")
-    @patch("publisher.views._get_pe_master_campaign_records")
-    def test_people_queries_are_scoped_to_pe_campaign_ids(
-        self,
-        get_pe_campaigns_mock,
-        build_local_campaign_map_mock,
-        list_field_reps_mock,
-        list_doctors_mock,
-        doctor_profile_objects_mock,
-    ) -> None:
-        get_pe_campaigns_mock.return_value = [
-            SimpleNamespace(
-                campaign_id="PE001",
-                name="PE Campaign",
-                num_doctors_supported=10,
-                enrolled_doctor_count=3,
-                field_rep_count=2,
-                start_date="2026-04-11",
-            )
-        ]
-        build_local_campaign_map_mock.return_value = {}
-        list_field_reps_mock.return_value = []
-        list_doctors_mock.return_value = []
-        doctor_profile_objects_mock.select_related.return_value.filter.return_value = []
-
-        context = _build_pe_records_context()
-
-        list_field_reps_mock.assert_called_once_with("", campaign_ids=["PE001"])
-        list_doctors_mock.assert_called_once_with("", campaign_ids=["PE001"])
-        self.assertEqual(context["stats"]["master_campaigns"], 1)
-        self.assertEqual(context["stats"]["field_reps"], 0)
-        self.assertEqual(context["stats"]["doctors"], 0)
+        self.assertIsNotNone(claims)
+        self.assertEqual(claims["email"], "khushan.poptani@inditech.co.in")
+        authorized_mock.assert_not_called()
 
 
 @override_settings(
