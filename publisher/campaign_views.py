@@ -8,6 +8,7 @@ from django.contrib import messages
 from django.db import models, transaction
 from django.db.models import Q
 from django.http import (
+    Http404,
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
@@ -27,6 +28,10 @@ from django.utils.http import urlencode
 from django.views.decorators.http import require_http_methods
 
 from accounts import master_db
+from pe_migration.live_sync import upsert_campaign_v2
+from pe_migration.models import PeCampaignV2
+from pe_migration.runtime import is_v2_enabled
+from pe_migration.services import normalize_campaign_id
 
 from catalog.models import (
     TherapyArea,
@@ -39,7 +44,12 @@ from catalog.models import (
     VideoClusterVideo,
 )
 
-from .campaign_auth import SESSION_CAMPAIGN_KEY, get_publisher_claims, publisher_required
+from .campaign_auth import (
+    SESSION_CAMPAIGN_KEY,
+    get_publisher_claims,
+    make_campaign_form_access_token,
+    publisher_required,
+)
 from .campaign_forms import CampaignCreateForm, CampaignEditForm
 from .models import Campaign
 
@@ -404,6 +414,59 @@ def field_rep_landing_page(request: HttpRequest) -> HttpResponse:
     join_pk_hit: Dict[str, Any] = {}
 
     resolved_options: List[Dict[str, Any]] = []
+
+    campaign_scoped_hits: List[Dict[str, Any]] = []
+    for cand in lookup_candidates:
+        if not cand:
+            continue
+        try:
+            campaign_field_rep_id = master_db.resolve_campaign_field_rep_id(
+                campaign_id=campaign_id_db,
+                field_rep_identifier=cand,
+            )
+        except Exception as e:
+            _plog(
+                "field_rep_landing.field_rep.campaign_scoped_lookup_error",
+                candidate=cand,
+                error=str(e),
+                traceback=traceback.format_exc()[-2000:],
+            )
+            debug_info.setdefault("errors", []).append(
+                {"stage": "field_rep_campaign_scoped_lookup", "candidate": cand, "error": f"{type(e).__name__}: {e}"}
+            )
+            campaign_field_rep_id = None
+
+        if not campaign_field_rep_id:
+            continue
+
+        try:
+            tmp = master_db.get_field_rep(str(campaign_field_rep_id))
+        except Exception as e:
+            debug_info.setdefault("errors", []).append(
+                {
+                    "stage": "field_rep_campaign_scoped_hydrate",
+                    "candidate": cand,
+                    "field_rep_id": campaign_field_rep_id,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+            tmp = None
+
+        if not tmp:
+            continue
+
+        linked = _is_fieldrep_linked_to_campaign(int(tmp.id))
+        hit = {
+            "candidate": cand,
+            "field_rep_id": int(tmp.id),
+            "brand_supplied_field_rep_id": str(tmp.brand_supplied_field_rep_id or ""),
+            "is_active": bool(tmp.is_active),
+            "linked_to_campaign": bool(linked),
+        }
+        campaign_scoped_hits.append(hit)
+        resolved_options.append({"source": "campaign_scoped", **hit})
+
+    debug_info["field_rep_campaign_scoped_hits"] = campaign_scoped_hits
 
     # ---- Direct lookups (do NOT early-return; keep options for later selection)
     for cand in lookup_candidates:
@@ -819,7 +882,7 @@ def field_rep_landing_page(request: HttpRequest) -> HttpResponse:
         clinic_link = f"{base_url}/clinic/{doctor.doctor_id}/share/"
 
         # Prefer local (Project2) campaign message template if present; fall back to master.
-        local_campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
+        local_campaign = _get_current_campaign_record(campaign_id)
         msg_template = ""
         if local_campaign and getattr(local_campaign, "wa_addition", None):
             msg_template = str(local_campaign.wa_addition or "")
@@ -976,6 +1039,49 @@ def _generate_unique_cluster_code(name: str) -> str:
     return code
 
 
+def _get_current_campaign_record(campaign_id: str):
+    campaign_id = str(campaign_id or "").strip()
+    if is_v2_enabled():
+        return PeCampaignV2.objects.filter(
+            is_current=True,
+            pe_campaign_id_normalized=normalize_campaign_id(campaign_id),
+        ).first()
+    return Campaign.objects.filter(campaign_id=campaign_id).first()
+
+
+def _campaign_exists(campaign_id: str) -> bool:
+    return _get_current_campaign_record(campaign_id) is not None
+
+
+def _campaign_rows_queryset():
+    if is_v2_enabled():
+        return PeCampaignV2.objects.filter(is_current=True).order_by("-updated_at", "campaign_id")
+    return Campaign.objects.all().order_by("-created_at")
+
+
+def _campaign_video_cluster(campaign):
+    if hasattr(campaign, "video_cluster"):
+        try:
+            return campaign.video_cluster
+        except Exception:
+            pass
+    video_cluster_id = getattr(campaign, "video_cluster_id", None)
+    if not video_cluster_id:
+        return None
+    return VideoCluster.objects.filter(pk=video_cluster_id).first()
+
+
+def _campaign_file_or_text_value(campaign, field_name: str) -> str:
+    value = getattr(campaign, field_name, "") or ""
+    try:
+        url = getattr(value, "url", None)
+        if url:
+            return str(url)
+    except Exception:
+        pass
+    return str(value or "")
+
+
 # -----------------------------
 # Pages
 # -----------------------------
@@ -1035,7 +1141,7 @@ def add_campaign_details(request: HttpRequest) -> HttpResponse:
     # Capture Project1 meta (safe no-op if params absent)
     meta = _capture_campaign_meta(request, campaign_id)
 
-    existing = Campaign.objects.filter(campaign_id=campaign_id).first()
+    existing = _get_current_campaign_record(campaign_id)
     if existing and request.method == "GET":
         messages.info(request, "Campaign already has details. Redirected to edit screen.")
         return redirect(
@@ -1113,7 +1219,7 @@ def add_campaign_details(request: HttpRequest) -> HttpResponse:
                     },
                 )
 
-            if Campaign.objects.filter(campaign_id=campaign_id).exists():
+            if _campaign_exists(campaign_id):
                 messages.error(
                     request, "Campaign already exists. Use edit instead."
                 )
@@ -1167,23 +1273,42 @@ def add_campaign_details(request: HttpRequest) -> HttpResponse:
                     or str(form.cleaned_data.get("banner_target_url") or "").strip()
                 )
 
-                Campaign.objects.create(
-                    campaign_id=campaign_id,
-                    new_video_cluster_name=new_cluster_name,
-                    selection_json=form.cleaned_data["selected_items_json"],
-                    doctors_supported=ds_value,
-                    banner_small="",
-                    banner_large="",
-                    banner_target_url=bt_value,
-                    start_date=form.cleaned_data["start_date"],
-                    end_date=form.cleaned_data["end_date"],
-                    video_cluster=cluster,
-                    publisher_sub=publisher_sub,
-                    publisher_username=publisher_username,
-                    publisher_roles=publisher_roles,
-                    email_registration=form.cleaned_data["email_registration"],
-                    wa_addition=form.cleaned_data["wa_addition"],
-                )
+                if is_v2_enabled():
+                    upsert_campaign_v2(
+                        campaign_id=campaign_id,
+                        new_video_cluster_name=new_cluster_name,
+                        selection_json=form.cleaned_data["selected_items_json"],
+                        doctors_supported=ds_value,
+                        banner_small="",
+                        banner_large="",
+                        banner_target_url=bt_value,
+                        start_date=form.cleaned_data["start_date"],
+                        end_date=form.cleaned_data["end_date"],
+                        video_cluster_id=cluster.pk,
+                        publisher_sub=publisher_sub,
+                        publisher_username=publisher_username,
+                        publisher_roles=publisher_roles,
+                        email_registration=form.cleaned_data["email_registration"],
+                        wa_addition=form.cleaned_data["wa_addition"],
+                    )
+                else:
+                    Campaign.objects.create(
+                        campaign_id=campaign_id,
+                        new_video_cluster_name=new_cluster_name,
+                        selection_json=form.cleaned_data["selected_items_json"],
+                        doctors_supported=ds_value,
+                        banner_small="",
+                        banner_large="",
+                        banner_target_url=bt_value,
+                        start_date=form.cleaned_data["start_date"],
+                        end_date=form.cleaned_data["end_date"],
+                        video_cluster=cluster,
+                        publisher_sub=publisher_sub,
+                        publisher_username=publisher_username,
+                        publisher_roles=publisher_roles,
+                        email_registration=form.cleaned_data["email_registration"],
+                        wa_addition=form.cleaned_data["wa_addition"],
+                    )
 
             messages.success(
                 request,
@@ -1197,6 +1322,7 @@ def add_campaign_details(request: HttpRequest) -> HttpResponse:
     # GET (and POST invalid)
     initial = {
         "campaign_id": campaign_id,
+        "publisher_form_access_token": make_campaign_form_access_token(campaign_id, claims),
         "selected_items_json": "[]",
         "email_registration": "",
         "wa_addition": "",
@@ -1240,7 +1366,7 @@ def campaign_list(request: HttpRequest) -> HttpResponse:
     claims = get_publisher_claims(request) or {}
 
     q = (request.GET.get("q") or "").strip()
-    rows = Campaign.objects.all().order_by("-created_at")
+    rows = _campaign_rows_queryset()
 
     if q:
         rows = rows.filter(
@@ -1263,15 +1389,9 @@ def campaign_list(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["GET", "POST"])
 def edit_campaign_details(request: HttpRequest, campaign_id: str) -> HttpResponse:
     claims = get_publisher_claims(request) or {}
-    campaign = get_object_or_404(Campaign, campaign_id=campaign_id)
-
-    def _safe_file_url(fieldfile) -> str:
-        try:
-            if fieldfile and getattr(fieldfile, "url", None):
-                return fieldfile.url
-        except Exception:
-            pass
-        return ""
+    campaign = _get_current_campaign_record(campaign_id)
+    if campaign is None:
+        raise Http404("Campaign not found.")
 
     try:
         master_campaign = master_db.get_campaign(campaign.campaign_id)
@@ -1285,12 +1405,12 @@ def edit_campaign_details(request: HttpRequest, campaign_id: str) -> HttpRespons
         "banner_small_url": (
             str(getattr(master_campaign, "banner_small_url", "") or "")
             if master_campaign and getattr(master_campaign, "banner_small_url", "")
-            else _safe_file_url(campaign.banner_small)
+            else _campaign_file_or_text_value(campaign, "banner_small")
         ),
         "banner_large_url": (
             str(getattr(master_campaign, "banner_large_url", "") or "")
             if master_campaign and getattr(master_campaign, "banner_large_url", "")
-            else _safe_file_url(campaign.banner_large)
+            else _campaign_file_or_text_value(campaign, "banner_large")
         ),
         "banner_target_url": (
             str(getattr(master_campaign, "banner_target_url", "") or "")
@@ -1344,7 +1464,7 @@ def edit_campaign_details(request: HttpRequest, campaign_id: str) -> HttpRespons
                     )
 
             with transaction.atomic():
-                cluster = campaign.video_cluster
+                cluster = _campaign_video_cluster(campaign)
 
                 if cluster and new_cluster_name:
                     cluster.display_name = new_cluster_name
@@ -1374,23 +1494,41 @@ def edit_campaign_details(request: HttpRequest, campaign_id: str) -> HttpRespons
                             video_cluster=cluster, video=v, sort_order=idx
                         )
 
-                campaign.new_video_cluster_name = new_cluster_name
-                campaign.selection_json = form.cleaned_data["selected_items_json"]
-                campaign.start_date = form.cleaned_data["start_date"]
-                campaign.end_date = form.cleaned_data["end_date"]
-                campaign.email_registration = form.cleaned_data["email_registration"]
-                campaign.wa_addition = form.cleaned_data["wa_addition"]
-
-                # ENFORCE MASTER read-only fields (with fallback)
-                campaign.doctors_supported = int(
-                    readonly.get("doctors_supported") or 0
-                )
-                campaign.banner_target_url = (
+                doctors_supported = int(readonly.get("doctors_supported") or 0)
+                banner_target_url = (
                     str(readonly.get("banner_target_url") or "").strip()
                     or str(form.cleaned_data.get("banner_target_url") or "").strip()
                 )
 
-                campaign.save()
+                if is_v2_enabled():
+                    campaign = upsert_campaign_v2(
+                        campaign_id=campaign.campaign_id,
+                        new_video_cluster_name=new_cluster_name,
+                        selection_json=form.cleaned_data["selected_items_json"],
+                        doctors_supported=doctors_supported,
+                        banner_small=_campaign_file_or_text_value(campaign, "banner_small"),
+                        banner_large=_campaign_file_or_text_value(campaign, "banner_large"),
+                        banner_target_url=banner_target_url,
+                        start_date=form.cleaned_data["start_date"],
+                        end_date=form.cleaned_data["end_date"],
+                        video_cluster_id=getattr(cluster, "pk", None),
+                        publisher_sub=getattr(campaign, "publisher_sub", "") or "",
+                        publisher_username=getattr(campaign, "publisher_username", "") or "",
+                        publisher_roles=getattr(campaign, "publisher_roles", "") or "",
+                        email_registration=form.cleaned_data["email_registration"],
+                        wa_addition=form.cleaned_data["wa_addition"],
+                        created_at=getattr(campaign, "created_at", None),
+                    )
+                else:
+                    campaign.new_video_cluster_name = new_cluster_name
+                    campaign.selection_json = form.cleaned_data["selected_items_json"]
+                    campaign.start_date = form.cleaned_data["start_date"]
+                    campaign.end_date = form.cleaned_data["end_date"]
+                    campaign.email_registration = form.cleaned_data["email_registration"]
+                    campaign.wa_addition = form.cleaned_data["wa_addition"]
+                    campaign.doctors_supported = doctors_supported
+                    campaign.banner_target_url = banner_target_url
+                    campaign.save()
 
             messages.success(request, "Campaign updated successfully.")
             return redirect(reverse("campaign_publisher:campaign_list"))
@@ -1399,6 +1537,7 @@ def edit_campaign_details(request: HttpRequest, campaign_id: str) -> HttpRespons
     form = CampaignEditForm(
         initial={
             "campaign_id": campaign.campaign_id,
+            "publisher_form_access_token": make_campaign_form_access_token(campaign.campaign_id, claims),
             "new_video_cluster_name": campaign.new_video_cluster_name,
             "selected_items_json": campaign.selection_json or "[]",
             "start_date": campaign.start_date,
@@ -1510,5 +1649,3 @@ def api_expand_selection(request: HttpRequest) -> JsonResponse:
 
     out = [{"id": v.id, "code": v.code, "title": _video_title_en(v)} for v in videos]
     return JsonResponse({"videos": out})
-
-

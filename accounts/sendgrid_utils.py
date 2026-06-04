@@ -644,6 +644,19 @@ def send_email_via_sendgrid(
     mode = _get_backend_mode()
     from_addr = _resolve_from_email(from_email)
 
+    if mode == "console":
+        for r in recipients:
+            _log_email_attempt(
+                to_email=r,
+                subject=subject,
+                provider="console",
+                success=True,
+                status_code=None,
+                response_body=_truncate(plain_text_content or ""),
+                error="",
+            )
+        return True
+
     providers = ["smtp", "sendgrid"] if mode == "smtp" else ["sendgrid", "smtp"]
 
     for provider in providers:

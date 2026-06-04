@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Sequence
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.core import signing
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect
 
@@ -26,6 +27,9 @@ LEGACY_CAMPAIGN_KEY = "publisher_current_campaign_id"
 
 SESSION_PUBLISHER_MASTER_VALIDATION = "publisher_master_validation"
 PUBLISHER_MASTER_VALIDATION_TTL_SECONDS = getattr(settings, "PUBLISHER_MASTER_VALIDATION_TTL_SECONDS", 300)
+FORM_ACCESS_TOKEN_FIELD = "publisher_form_access_token"
+FORM_ACCESS_TOKEN_SALT = "publisher.campaign.form_access"
+FORM_ACCESS_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 2
 
 
 def unauthorized_response() -> HttpResponse:
@@ -44,14 +48,24 @@ def _normalize_roles(value: Any) -> Sequence[str]:
     return [str(value)]
 
 
+TOKEN_QUERY_PARAM_NAMES = (
+    "token",
+    "sso_token",
+    "jwt",
+    "access_token",
+    "jwt_token",
+    "id_token",
+)
+
+
 def _extract_token(request: HttpRequest) -> Optional[str]:
     token = (
         request.GET.get("token")
         or request.GET.get("sso_token")
         or request.GET.get("jwt")
         or request.GET.get("access_token")
-        or request.GET.get("jwt_token")     # NEW
-        or request.GET.get("id_token")      # NEW (if Project1 uses this)
+        or request.GET.get("jwt_token")
+        or request.GET.get("id_token")
     )
     if token:
         return token.strip()
@@ -78,6 +92,102 @@ def _extract_email_from_claims(ident: Dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_claims_for_form_token(claims: Dict[str, Any]) -> Dict[str, Any]:
+    email = _extract_email_from_claims(claims)
+    return {
+        "sub": str(claims.get("sub") or ""),
+        "username": str(claims.get("username") or email or ""),
+        "roles": list(_normalize_roles(claims.get("roles") or ["publisher"])),
+        "iss": str(claims.get("iss") or getattr(settings, "SSO_EXPECTED_ISSUER", "project1")),
+        "aud": str(claims.get("aud") or getattr(settings, "SSO_EXPECTED_AUDIENCE", "project2")),
+        "email": email,
+        "publisher_email": str(claims.get("publisher_email") or email or ""),
+        "auth_source": str(claims.get("auth_source") or "campaign_form_token"),
+    }
+
+
+def make_campaign_form_access_token(campaign_id: str, claims: Dict[str, Any]) -> str:
+    payload = {
+        "campaign_id": str(campaign_id or "").strip(),
+        "claims": _normalize_claims_for_form_token(claims or {}),
+        "iat": int(time.time()),
+    }
+    return signing.dumps(payload, salt=FORM_ACCESS_TOKEN_SALT)
+
+
+def _session_set(request: HttpRequest, key: str, value: Any) -> None:
+    request.session[key] = value
+    try:
+        request.session.modified = True
+    except Exception:
+        pass
+
+
+def _claims_from_campaign_form_access_token(request: HttpRequest) -> Optional[Dict[str, Any]]:
+    if request.method != "POST":
+        return None
+
+    token = (request.POST.get(FORM_ACCESS_TOKEN_FIELD) or "").strip()
+    if not token:
+        return None
+
+    max_age = int(
+        getattr(
+            settings,
+            "PUBLISHER_FORM_ACCESS_TOKEN_AGE_SECONDS",
+            FORM_ACCESS_TOKEN_MAX_AGE_SECONDS,
+        )
+    )
+    try:
+        payload = signing.loads(token, salt=FORM_ACCESS_TOKEN_SALT, max_age=max_age)
+    except (signing.BadSignature, signing.SignatureExpired, TypeError, ValueError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    campaign_id = str(payload.get("campaign_id") or "").strip()
+    posted_campaign_id = (
+        request.POST.get("campaign_id")
+        or request.GET.get("campaign-id")
+        or request.GET.get("campaign_id")
+        or ""
+    )
+    posted_campaign_id = str(posted_campaign_id or "").strip()
+    if not campaign_id or not posted_campaign_id or campaign_id != posted_campaign_id:
+        return None
+
+    claims = payload.get("claims")
+    if not isinstance(claims, dict):
+        return None
+
+    roles = [role.lower() for role in _normalize_roles(claims.get("roles"))]
+    if "publisher" not in roles:
+        return None
+
+    _session_set(request, SESSION_KEY, claims)
+    _session_set(request, SESSION_CAMPAIGN_KEY, campaign_id)
+    return claims
+
+
+def _staff_user_claims(request: HttpRequest) -> Optional[Dict[str, Any]]:
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    if not (getattr(user, "is_staff", False) or getattr(user, "is_superuser", False)):
+        return None
+
+    email = (getattr(user, "email", "") or "").strip().lower()
+    username = email or str(user)
+    return {
+        "sub": f"django-user:{getattr(user, 'pk', '')}",
+        "username": username,
+        "roles": ["publisher", "admin"],
+        "email": email,
+        "auth_source": "django_staff",
+    }
+
+
 def _is_publisher_authorized_in_master(request: HttpRequest, email: str) -> bool:
     if not email:
         return False
@@ -100,11 +210,35 @@ def _is_publisher_authorized_in_master(request: HttpRequest, email: str) -> bool
     return bool(ok)
 
 
+def _is_verified_sso_identity(ident: Dict[str, Any]) -> bool:
+    if not getattr(settings, "PUBLISHER_TRUST_VERIFIED_SSO", True):
+        return False
+
+    roles = _normalize_roles(ident.get("roles"))
+    if "publisher" not in [r.lower() for r in roles]:
+        return False
+
+    issuer = (ident.get("iss") or "").strip()
+    audience = (ident.get("aud") or "").strip()
+    return (
+        issuer == getattr(settings, "SSO_EXPECTED_ISSUER", "project1")
+        and audience == getattr(settings, "SSO_EXPECTED_AUDIENCE", "project2")
+        and bool(_extract_email_from_claims(ident))
+    )
+
+
 def get_publisher_claims(request: HttpRequest) -> Optional[Dict[str, Any]]:
+    staff_claims = _staff_user_claims(request)
+    if staff_claims:
+        return staff_claims
+
     ident = request.session.get(SESSION_KEY)
     if isinstance(ident, dict):
         roles = _normalize_roles(ident.get("roles"))
         if "publisher" in [r.lower() for r in roles]:
+            if _is_verified_sso_identity(ident):
+                return ident
+
             email = _extract_email_from_claims(ident)
             if _is_publisher_authorized_in_master(request, email):
                 return ident
@@ -146,7 +280,7 @@ def _redirect_to_sso_consume(request: HttpRequest, token: str) -> HttpResponse:
 
     # next URL without token params
     params = request.GET.copy()
-    for k in ("token", "sso_token", "jwt", "access_token"):
+    for k in TOKEN_QUERY_PARAM_NAMES:
         params.pop(k, None)
 
     next_url = request.path
@@ -208,6 +342,12 @@ def publisher_required(view_func):
         if claims:
             _plog("publisher_required.authorized", roles=claims.get("roles"))
             _dbg("authorized=True")
+            return view_func(request, *args, **kwargs)
+
+        form_claims = _claims_from_campaign_form_access_token(request)
+        if form_claims:
+            _plog("publisher_required.form_token_authorized", roles=form_claims.get("roles"))
+            _dbg("authorized=True via form token")
             return view_func(request, *args, **kwargs)
 
         # Not authorized via session. Explain why (debug), then try token.
