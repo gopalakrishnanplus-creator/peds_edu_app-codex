@@ -487,7 +487,7 @@ def normalize_campaign_id(campaign_id: str) -> str:
 
     Normalize by removing hyphens and trimming.
     """
-    return (campaign_id or "").strip().replace("-", "")
+    return (campaign_id or "").strip().replace("-", "").lower()
 
 
 def get_campaign_fieldrep_link_fieldrep_id(*, campaign_id: str, link_pk: int) -> Optional[int]:
@@ -1022,35 +1022,124 @@ def get_campaign(campaign_id: str) -> Optional[MasterCampaign]:
     if not cid_raw:
         return None
 
-    cid_norm = cid_raw.replace("-", "")
+    cid_norm = normalize_campaign_id(cid_raw)
 
     conn = get_master_connection()
 
     table = getattr(settings, "MASTER_DB_CAMPAIGN_TABLE", "campaign_campaign")
-    id_col = getattr(settings, "MASTER_DB_CAMPAIGN_ID_COLUMN", "id")
+    cols = _get_table_columns(conn, table)
 
-    ds_col = getattr(settings, "MASTER_DB_CAMPAIGN_DOCTORS_SUPPORTED_COLUMN", "num_doctors_supported")
-    wa_col = getattr(settings, "MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN", "add_to_campaign_message")
-    vc_col = getattr(settings, "MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN", "name")
-    er_col = getattr(settings, "MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN", "register_message")
+    def _candidates(*names: str) -> list[str]:
+        result: list[str] = []
+        for name in names:
+            value = str(name or "").strip()
+            if value and value not in result:
+                result.append(value)
+        return result
 
-    # banner cols are fixed in your schema; allow override via settings if ever needed
-    bs_col = getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_SMALL_URL_COLUMN", "banner_small_url")
-    bl_col = getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_LARGE_URL_COLUMN", "banner_large_url")
-    bt_col = getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_TARGET_URL_COLUMN", "banner_target_url")
+    configured_id_col = getattr(settings, "MASTER_DB_CAMPAIGN_ID_COLUMN", "id")
+    id_col = _pick_first_column(cols, _candidates(configured_id_col, "id", "campaign_id", "uuid"))
+    if not id_col:
+        _log_db(
+            "master_db.get_campaign.missing_id_column",
+            campaign_id=cid_raw,
+            campaign_id_norm=cid_norm,
+            table=table,
+            configured_id_col=configured_id_col,
+            available_columns=cols,
+        )
+        return None
 
-    # Some DBs store id as CHAR(32) (no hyphens). We query both.
+    field_candidates = [
+        (
+            "campaign_id",
+            [id_col],
+            "''",
+        ),
+        (
+            "doctors_supported",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_DOCTORS_SUPPORTED_COLUMN", "num_doctors_supported"),
+                "num_doctors_supported",
+                "doctors_supported",
+            ),
+            "0",
+        ),
+        (
+            "wa_addition",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_WA_ADDITION_COLUMN", "add_to_campaign_message"),
+                "add_to_campaign_message",
+                "wa_addition",
+            ),
+            "''",
+        ),
+        (
+            "new_video_cluster_name",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_VIDEO_CLUSTER_COLUMN", "name"),
+                "name",
+                "new_video_cluster_name",
+            ),
+            "''",
+        ),
+        (
+            "email_registration",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_EMAIL_REGISTRATION_COLUMN", "register_message"),
+                "register_message",
+                "email_registration",
+            ),
+            "''",
+        ),
+        (
+            "banner_small_url",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_SMALL_URL_COLUMN", "banner_small_url"),
+                "banner_small_url",
+                "banner_small",
+            ),
+            "''",
+        ),
+        (
+            "banner_large_url",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_LARGE_URL_COLUMN", "banner_large_url"),
+                "banner_large_url",
+                "banner_large",
+            ),
+            "''",
+        ),
+        (
+            "banner_target_url",
+            _candidates(
+                getattr(settings, "MASTER_DB_CAMPAIGN_BANNER_TARGET_URL_COLUMN", "banner_target_url"),
+                "banner_target_url",
+            ),
+            "''",
+        ),
+    ]
+
+    select_parts: list[str] = []
+    row_keys: list[str] = []
+    for key, candidates, default_sql in field_candidates:
+        col = _pick_first_column(cols, candidates)
+        expr = qn(col) if col else default_sql
+        select_parts.append(f"{expr} AS {qn(key)}")
+        row_keys.append(key)
+
+    # Master campaign IDs can arrive hyphenated or non-hyphenated. Compare by
+    # the canonical PE/RFA rule: lowercase and remove hyphens.
     sql = (
-        f"SELECT {qn(id_col)}, {qn(ds_col)}, {qn(wa_col)}, {qn(vc_col)}, {qn(er_col)}, "
-        f"{qn(bs_col)}, {qn(bl_col)}, {qn(bt_col)} "
+        f"SELECT {', '.join(select_parts)} "
         f"FROM {qn(table)} "
-        f"WHERE {qn(id_col)} = %s OR {qn(id_col)} = %s "
+        f"WHERE LOWER(REPLACE({qn(id_col)}, '-', '')) = %s "
         f"LIMIT 1"
     )
 
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, [cid_norm, cid_raw])
+            cur.execute(sql, [cid_norm])
             row = cur.fetchone()
     except Exception as ex:
         _log_db_exc(
@@ -1073,21 +1162,21 @@ def get_campaign(campaign_id: str) -> Optional[MasterCampaign]:
         )
         return None
 
-    # row layout matches SELECT order
+    row_data = dict(zip(row_keys, row))
     try:
-        ds_val = int(row[1] or 0)
+        ds_val = int(row_data.get("doctors_supported") or 0)
     except Exception:
         ds_val = 0
 
     return MasterCampaign(
-        campaign_id=str(row[0] or "").strip(),
+        campaign_id=str(row_data.get("campaign_id") or "").strip(),
         doctors_supported=ds_val,
-        wa_addition=str(row[2] or ""),
-        new_video_cluster_name=str(row[3] or ""),
-        email_registration=str(row[4] or ""),
-        banner_small_url=str(row[5] or ""),
-        banner_large_url=str(row[6] or ""),
-        banner_target_url=str(row[7] or ""),
+        wa_addition=str(row_data.get("wa_addition") or ""),
+        new_video_cluster_name=str(row_data.get("new_video_cluster_name") or ""),
+        email_registration=str(row_data.get("email_registration") or ""),
+        banner_small_url=str(row_data.get("banner_small_url") or ""),
+        banner_large_url=str(row_data.get("banner_large_url") or ""),
+        banner_target_url=str(row_data.get("banner_target_url") or ""),
     )
 
 

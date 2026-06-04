@@ -127,3 +127,78 @@ class FieldRepResolverTests(SimpleTestCase):
         self.assertTrue(
             fake_conn.cursor_instance.queries[0][0].strip().startswith("SELECT fr.`id`")
         )
+
+
+class CampaignLookupTests(SimpleTestCase):
+    def test_get_campaign_skips_optional_master_columns_that_do_not_exist(self) -> None:
+        class FakeOps:
+            @staticmethod
+            def quote_name(name):
+                return f"`{name}`"
+
+        class FakeCursor:
+            def __init__(self):
+                self.last_row = None
+                self.queries = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params=None):
+                self.queries.append((sql, list(params or [])))
+                self.last_row = (
+                    "84eb443406464fb4b61a04721919db3f",
+                    12,
+                    "WhatsApp intro",
+                    "Campaign Name",
+                    "",
+                    "",
+                    "",
+                    "https://example.com/banner",
+                )
+
+            def fetchone(self):
+                return self.last_row
+
+        class FakeConnection:
+            vendor = "mysql"
+            ops = FakeOps()
+
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+        fake_conn = FakeConnection()
+        master_columns = [
+            "id",
+            "name",
+            "num_doctors_supported",
+            "add_to_campaign_message",
+            "banner_target_url",
+        ]
+
+        with (
+            patch("accounts.master_db.get_master_connection", return_value=fake_conn),
+            patch("accounts.master_db._get_table_columns", return_value=master_columns),
+        ):
+            campaign = master_db.get_campaign("84eb4434-0646-4fb4-b61a-04721919db3f")
+
+        self.assertIsNotNone(campaign)
+        self.assertEqual(campaign.campaign_id, "84eb443406464fb4b61a04721919db3f")
+        self.assertEqual(campaign.doctors_supported, 12)
+        self.assertEqual(campaign.wa_addition, "WhatsApp intro")
+        self.assertEqual(campaign.new_video_cluster_name, "Campaign Name")
+        self.assertEqual(campaign.email_registration, "")
+        self.assertEqual(campaign.banner_target_url, "https://example.com/banner")
+
+        sql, params = fake_conn.cursor_instance.queries[-1]
+        self.assertEqual(params, ["84eb443406464fb4b61a04721919db3f"])
+        self.assertIn("LOWER(REPLACE(`id`, '-', ''))", sql)
+        self.assertNotIn("`register_message`", sql)
+        self.assertNotIn("`banner_small_url` AS `banner_small_url`", sql)
+        self.assertNotIn("`banner_large_url` AS `banner_large_url`", sql)
